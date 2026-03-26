@@ -78,6 +78,7 @@ class LidarProcessor:
         downsample_factor_row=1,
         downsample_factor_col=2,
         downsample_method="scatter_min",
+        elevation_angles=None,
     ):
         """Initialize the LidarProcessor.
 
@@ -110,6 +111,7 @@ class LidarProcessor:
         if checkpoint_enc is None and checkpoint_dec is None:
             raise ValueError("checkpoint_enc and checkpoint_dec must be provided")
         
+        self.elevation_angles = elevation_angles
         self.range_map_downsampler = RangeMapDownsampler(
             row_factor=downsample_factor_row,
             col_factor=downsample_factor_col,
@@ -136,8 +138,11 @@ class LidarProcessor:
             Tuple of (processed_video, original_video, difference)
         """
         valid_mask = (input_video > self.min_range + 0.1) & (input_video < self.max_range - 0.1)
-        
-        elevation_angles = load_pandar128_elevations()
+
+        if self.elevation_angles is not None:
+            elevation_angles = self.elevation_angles
+        else:
+            elevation_angles = load_pandar128_elevations()
         ray_directions = range_map_to_ray_directions(input_video.shape[-1], elevation_angles)  # shape: (H, W, 3)
         ray_directions = np.repeat(ray_directions[np.newaxis, ...], input_video.shape[0], axis=0)
         

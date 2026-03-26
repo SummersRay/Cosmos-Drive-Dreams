@@ -19,6 +19,14 @@ import plotly.graph_objects as go
 from PIL import Image
 from tqdm import tqdm
 
+# Waymo TOP LiDAR extrinsic: lidar_sensor_frame -> vehicle_frame
+WAYMO_TOP_LIDAR_EXTRINSIC = np.array([
+    [-8.4777248e-01, -5.3035414e-01, -2.5136571e-03,  1.4299999e+00],
+    [ 5.3035545e-01, -8.4777534e-01,  1.8014426e-04,  0.0000000e+00],
+    [-2.2265569e-03, -1.1804104e-03,  9.9999684e-01,  2.1840000e+00],
+    [ 0.0000000e+00,  0.0000000e+00,  0.0000000e+00,  1.0000000e+00],
+], dtype=np.float64)
+
 
 def load_each_frame_from_tar_data(tar_data, frame_idx, n_rows=128, n_cols=3600):
     lidar_row = np.load(tar_data.extractfile(f'{frame_idx}.lidar_row.npz'))['arr_0']
@@ -111,6 +119,22 @@ def load_sensor_elevation_angles(param_path="assets/row-offset-spinning-lidar-mo
     return np.rad2deg(np.array(param['row_elevations_rad']))
 
 
+def make_uniform_elevation_angles(n_rows, fov_min=-3.0, fov_max=20.0):
+    """Create uniformly spaced elevation angles."""
+    return np.linspace(fov_min, fov_max, n_rows)
+
+
+def make_waymo_top_elevation_angles_128():
+    """Create 128 elevation angles from Waymo TOP LiDAR 64 beam inclinations.
+
+    Must match the conversion script exactly.
+    """
+    from convert_waymo_lidar_to_tokenizer_format import (
+        WAYMO_TOP_BEAM_INCLINATIONS_RAD, make_elevation_angles
+    )
+    return make_elevation_angles(WAYMO_TOP_BEAM_INCLINATIONS_RAD, 128)
+
+
 def range_map_to_ray_directions(n_cols, sensor_elevation_angles):
     azimuth_angles = np.linspace(np.pi, -np.pi, n_cols, endpoint=False)
     elevation_angles_rad = np.radians(sensor_elevation_angles)
@@ -119,6 +143,13 @@ def range_map_to_ray_directions(n_cols, sensor_elevation_angles):
     y = np.cos(elevation_grid) * np.sin(azimuth_grid)
     z = np.sin(elevation_grid)
     return np.stack([x, y, z], axis=-1)  # (H, W, 3)
+
+
+def transform_points_to_vehicle_frame(points):
+    """Transform points from Waymo TOP lidar frame to vehicle frame."""
+    rot = WAYMO_TOP_LIDAR_EXTRINSIC[:3, :3]
+    trans = WAYMO_TOP_LIDAR_EXTRINSIC[:3, 3]
+    return (points @ rot.T) + trans
 
 
 def render_point_cloud_plotly(points, colors_rgb, camera_view, point_size=0.3,
@@ -156,9 +187,11 @@ def render_point_cloud_plotly(points, colors_rgb, camera_view, point_size=0.3,
 
 def render_single_frame(args):
     """Worker function for parallel rendering."""
-    frame_idx, range_map_frame, ray_directions, camera_view, save_path = args
+    frame_idx, range_map_frame, ray_directions, camera_view, save_path, display_frame, use_waymo_vehicle_frame = args
     valid_mask = range_map_frame > 0
     points = ray_directions[valid_mask] * range_map_frame[valid_mask][:, np.newaxis]
+    if display_frame == "vehicle" and use_waymo_vehicle_frame:
+        points = transform_points_to_vehicle_frame(points)
 
     # Color by height (z)
     z = points[:, 2]
@@ -173,7 +206,8 @@ def render_single_frame(args):
 
 
 def render_point_cloud_video(range_maps, output_path, sensor_elevation_angles,
-                              camera_view_name="front_view", max_workers=8, fps=10):
+                              camera_view_name="front_view", max_workers=8, fps=10,
+                              display_frame="vehicle", use_waymo_vehicle_frame=False):
     """Render range maps as point cloud video."""
     n_frames, h, w = range_maps.shape
     camera_view = CAMERA_VIEWS[camera_view_name]
@@ -184,7 +218,7 @@ def render_point_cloud_video(range_maps, output_path, sensor_elevation_angles,
 
     process_args = [
         (i, range_maps[i], ray_directions, camera_view,
-         os.path.join(tmp_dir, f"pcd_{i:04d}.png"))
+         os.path.join(tmp_dir, f"pcd_{i:04d}.png"), display_frame, use_waymo_vehicle_frame)
         for i in range(n_frames)
     ]
 
@@ -218,6 +252,13 @@ def main():
     parser.add_argument("--camera_view", type=str, default="front_view",
                         choices=list(CAMERA_VIEWS.keys()), help="Camera view for point cloud rendering")
     parser.add_argument("--max_workers", type=int, default=8, help="Max parallel workers for PCD rendering")
+    parser.add_argument("--display_frame", type=str, default="vehicle", choices=["lidar", "vehicle"],
+                        help="Frame used for point-cloud visualization")
+    parser.add_argument("--elevation_mode", type=str, default="waymo_top",
+                        choices=["waymo_top", "uniform", "sensor_json"],
+                        help="Elevation angle mode: waymo_top (real beam inclinations), uniform, or sensor_json")
+    parser.add_argument("--fov_min", type=float, default=-17.72, help="Min elevation angle in degrees (for uniform mode)")
+    parser.add_argument("--fov_max", type=float, default=2.21, help="Max elevation angle in degrees (for uniform mode)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -257,13 +298,22 @@ def main():
 
     # Render point cloud video
     if args.vis_pcd:
-        param_path = os.path.join(os.path.dirname(__file__), "assets",
-                                  "row-offset-spinning-lidar-model-parameters.json")
-        sensor_elevation_angles = load_sensor_elevation_angles(param_path)
+        use_waymo_vehicle_frame = False
+        if args.elevation_mode == "waymo_top":
+            sensor_elevation_angles = make_waymo_top_elevation_angles_128()
+            use_waymo_vehicle_frame = True
+        elif args.elevation_mode == "uniform":
+            sensor_elevation_angles = make_uniform_elevation_angles(h, args.fov_min, args.fov_max)
+        else:
+            param_path = os.path.join(os.path.dirname(__file__), "assets",
+                                      "row-offset-spinning-lidar-model-parameters.json")
+            sensor_elevation_angles = load_sensor_elevation_angles(param_path)
         pcd_video_path = os.path.join(args.output_dir, f"{scene_name}_pcd.mp4")
         render_point_cloud_video(range_maps, pcd_video_path, sensor_elevation_angles,
                                   camera_view_name=args.camera_view,
-                                  max_workers=args.max_workers, fps=args.fps)
+                                  max_workers=args.max_workers, fps=args.fps,
+                                  display_frame=args.display_frame,
+                                  use_waymo_vehicle_frame=use_waymo_vehicle_frame)
 
 
 if __name__ == "__main__":

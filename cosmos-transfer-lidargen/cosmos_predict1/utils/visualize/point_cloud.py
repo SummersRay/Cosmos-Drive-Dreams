@@ -21,6 +21,13 @@ import open3d as o3d
 import os
 from cosmos_predict1.utils.lidar_rangemap import range_map_to_ray_directions, load_pandar128_elevations, range_map_to_point_cloud
 
+WAYMO_TOP_LIDAR_EXTRINSIC = np.array([
+    [-8.4777248e-01, -5.3035414e-01, -2.5136571e-03,  1.4299999e+00],
+    [ 5.3035545e-01, -8.4777534e-01,  1.8014426e-04,  0.0000000e+00],
+    [-2.2265569e-03, -1.1804104e-03,  9.9999684e-01,  2.1840000e+00],
+    [ 0.0000000e+00,  0.0000000e+00,  0.0000000e+00,  1.0000000e+00],
+], dtype=np.float64)
+
 # Configure environment for better Kaleido performance
 os.environ["KALEIDO_SCOPE_TIMEOUT"] = "60"  # Increase timeout to 60 seconds
 
@@ -157,6 +164,12 @@ def vis_point_cloud(point_cloud, colors, save_path):
     img = Image.fromarray(img)
     img.save(save_path)
 
+
+def transform_points_to_vehicle_frame(points: np.ndarray) -> np.ndarray:
+    rot = WAYMO_TOP_LIDAR_EXTRINSIC[:3, :3]
+    trans = WAYMO_TOP_LIDAR_EXTRINSIC[:3, 3]
+    return (points @ rot.T) + trans
+
 def o3d_statistical_filter(pts, nb_neighbors=20, std_ratio=1.0):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
@@ -194,7 +207,7 @@ def save_range_map_to_ply(
     o3d.io.write_point_cloud(save_path, pcd_ref)
     
     
-def render_range_map_to_point_cloud(range_map_input, range_map_recon, filter_outlier=False):
+def render_range_map_to_point_cloud(range_map_input, range_map_recon, filter_outlier=False, display_frame="lidar", waymo_top=False):
     """
     Render the range map to a point cloud.
     Input:
@@ -235,6 +248,10 @@ def render_range_map_to_point_cloud(range_map_input, range_map_recon, filter_out
             c_ray_origins[c_valid_mask_recon]
             + c_ray_directions[c_valid_mask_recon] * c_range_map_recon[c_valid_mask_recon][:, np.newaxis]
         )  # shape: (N, 3)
+
+        if display_frame == "vehicle" and waymo_top:
+            input_points = transform_points_to_vehicle_frame(input_points)
+            recon_points = transform_points_to_vehicle_frame(recon_points)
 
         if filter_outlier:
             recon_points = o3d_statistical_filter(recon_points)

@@ -1,15 +1,16 @@
 """
 Convert Waymo rds_hq lidar_raw data to LiDAR tokenizer training format.
 
-Waymo rds_hq lidar_raw contains only 'xyz' (vehicle frame) and 'lidar_to_world'
-(vehicle_to_world). This script projects xyz to spherical coordinates to build
-128x3600 range maps, matching the format expected by the tokenizer.
-
-No ncore dependency required.
+Waymo rds_hq lidar_raw contains 'xyz' in vehicle frame and 'lidar_to_world'
+(actually vehicle_to_world). This script:
+  1. Transforms xyz from vehicle frame to LiDAR sensor frame (needed because
+     the 2.184m height offset changes elevation angles significantly)
+  2. Projects to 128x3600 range maps using real beam inclinations
+  3. Composes pose as lidar_sensor_to_world = vehicle_to_world @ lidar_extrinsic
 
 Output format:
-  metadata/{clip_id}.npz  - pose_list, timestamps_list, frame_indices
-  lidar/{clip_id}.tar     - sparse range maps (row/col/range/intensity per frame)
+  metadata/{clip_id}.npz  - pose_list (lidar_to_world pairs), timestamps_list, frame_indices
+  lidar/{clip_id}.tar     - sparse range maps (row/col/range per frame)
 
 Usage:
   python convert_waymo_lidar_to_tokenizer_format.py \
@@ -18,13 +19,41 @@ Usage:
 """
 
 import os
-import json
 import re
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import click
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 from webdataset import WebDataset, non_empty, TarWriter
+
+
+# Waymo TOP LiDAR calibration (consistent across all Waymo Open Dataset clips)
+# Extracted from frame.context.laser_calibrations[TOP].beam_inclinations
+# 64 beams, non-uniform, in radians, ordered from highest to lowest elevation
+WAYMO_TOP_BEAM_INCLINATIONS_RAD = np.array([
+     0.03849,  0.03570,  0.03231,  0.02941,  0.02658,  0.02379,  0.02089,
+     0.01803,  0.01460,  0.01198,  0.00899,  0.00617,  0.00329,  0.00055,
+    -0.00268, -0.00545, -0.00849, -0.01113, -0.01419, -0.01682, -0.02016,
+    -0.02294, -0.02590, -0.02894, -0.03222, -0.03554, -0.03962, -0.04336,
+    -0.04745, -0.05171, -0.05606, -0.06060, -0.06619, -0.07076, -0.07635,
+    -0.08161, -0.08721, -0.09276, -0.09927, -0.10564, -0.11206, -0.11833,
+    -0.12536, -0.13210, -0.13941, -0.14685, -0.15429, -0.16180, -0.16976,
+    -0.17758, -0.18603, -0.19431, -0.20291, -0.21142, -0.22096, -0.22990,
+    -0.23938, -0.24864, -0.25816, -0.26761, -0.27795, -0.28828, -0.29886,
+    -0.30935,
+], dtype=np.float64)
+
+# Waymo TOP LiDAR extrinsic: lidar_sensor_frame -> vehicle_frame
+# LiDAR is mounted 1.43m forward, 0m lateral, 2.184m above vehicle origin
+# Rotation is ~148° yaw + negligible tilt (~0.13°)
+WAYMO_TOP_LIDAR_EXTRINSIC = np.array([
+    [-8.4777248e-01, -5.3035414e-01, -2.5136571e-03,  1.4299999e+00],
+    [ 5.3035545e-01, -8.4777534e-01,  1.8014426e-04,  0.0000000e+00],
+    [-2.2265569e-03, -1.1804104e-03,  9.9999684e-01,  2.1840000e+00],
+    [ 0.0000000e+00,  0.0000000e+00,  0.0000000e+00,  1.0000000e+00],
+], dtype=np.float64)
 
 
 def natural_key(string_):
@@ -44,32 +73,32 @@ def write_to_tar(sample, output_file):
     sink.close()
 
 
-def load_sensor_elevation_angles(param_path="assets/row-offset-spinning-lidar-model-parameters.json"):
-    """Load elevation angles from the default sensor model parameters."""
-    param = json.load(open(param_path, "r"))
-    return np.rad2deg(np.array(param['row_elevations_rad']))  # in degrees
+def make_elevation_angles(beam_inclinations_rad, n_rows):
+    """Create n_rows elevation angles by interpolating Waymo TOP beams.
 
-
-def make_uniform_elevation_angles(n_rows, fov_min=-3.0, fov_max=20.0):
-    """Create uniformly spaced elevation angles for Waymo LiDAR.
-
-    Waymo's merged point cloud (top + side LiDARs) covers roughly [-3, 20] degrees
-    in elevation. Using uniform spacing avoids the sparse ring problem caused by
-    mismatched sensor models.
+    Returns descending order (high-to-low), matching Pandar128 convention:
+    row 0 = highest elevation (+2.21°), row N-1 = lowest (-17.72°).
     """
-    return np.linspace(fov_min, fov_max, n_rows)
+    if n_rows <= 0:
+        raise ValueError(f"n_rows must be positive, got {n_rows}")
+
+    beam_deg = np.rad2deg(beam_inclinations_rad)
+    beam_asc = beam_deg[::-1]  # ascending for interpolation
+    x_orig = np.linspace(0, 1, len(beam_asc))
+    x_new = np.linspace(0, 1, n_rows)
+    elevation = np.interp(x_new, x_orig, beam_asc)
+    return elevation[::-1].copy()  # descending: +2.21 ... -17.72
 
 
-def points_to_range_map(xyz, n_rows, n_cols, sensor_elevation_angles, max_range=105):
+def points_to_range_map(xyz, n_rows, n_cols, elevation_angles_deg, max_range=105):
     """
     Project xyz points to a range map using spherical coordinates.
-    Uses scatter-min to keep nearest point per pixel (via sort + assign).
 
     Args:
-        xyz: (N, 3) float32 array, points in sensor/vehicle frame
+        xyz: (N, 3) float32 array, points in LiDAR sensor frame
         n_rows: number of rows (elevation bins)
         n_cols: number of columns (azimuth bins)
-        sensor_elevation_angles: (n_rows,) array of elevation angles in degrees
+        elevation_angles_deg: (n_rows,) array of elevation angles in degrees
         max_range: maximum range threshold
 
     Returns:
@@ -81,10 +110,9 @@ def points_to_range_map(xyz, n_rows, n_cols, sensor_elevation_angles, max_range=
     # Filter by range
     valid_range = (range_values > 0) & (range_values < max_range)
 
-    # Compute azimuth -> column index
+    # Compute azimuth -> column index (modulo wrap at 360°)
     azimuth = -np.arctan2(y, x) + np.pi  # [0, 2*pi)
-    col_idx = ((azimuth / (2 * np.pi)) * n_cols).astype(np.int32)
-    col_idx = np.clip(col_idx, 0, n_cols - 1)
+    col_idx = ((azimuth / (2 * np.pi)) * n_cols).astype(np.int32) % n_cols
 
     # Compute elevation -> row index (find nearest elevation angle)
     elevation = np.arcsin(z / np.clip(range_values, 1e-6, None))
@@ -92,8 +120,8 @@ def points_to_range_map(xyz, n_rows, n_cols, sensor_elevation_angles, max_range=
 
     # Filter by elevation range
     epsilon = 0.5
-    min_angle = sensor_elevation_angles.min() - epsilon
-    max_angle = sensor_elevation_angles.max() + epsilon
+    min_angle = elevation_angles_deg.min() - epsilon
+    max_angle = elevation_angles_deg.max() + epsilon
     valid_elev = (elevation_deg >= min_angle) & (elevation_deg <= max_angle)
     valid = valid_range & valid_elev
 
@@ -102,7 +130,7 @@ def points_to_range_map(xyz, n_rows, n_cols, sensor_elevation_angles, max_range=
     range_v = range_values[valid]
 
     # Find closest row for each point
-    row_v = np.argmin(np.abs(elevation_deg_v[:, None] - sensor_elevation_angles[None, :]), axis=1)
+    row_v = np.argmin(np.abs(elevation_deg_v[:, None] - elevation_angles_deg[None, :]), axis=1)
 
     # Build range map: sort by range descending, assign so nearest overwrites
     sort_idx = np.argsort(-range_v)
@@ -134,8 +162,10 @@ def get_timestamps_from_dir(input_root, clip_id):
 
 
 def process_clip(clip_id, input_root, metadata_output_root, rangemap_output_root,
-                 sensor_elevation_angles, n_rows=128, n_cols=3600):
-    """Process a single clip: build range maps from raw lidar xyz and save."""
+                 elevation_angles_deg, vehicle_to_lidar, lidar_extrinsic, n_cols=3600):
+    """Process a single clip: transform to lidar frame, build range maps, save with correct pose."""
+    n_rows = len(elevation_angles_deg)  # always matches elevation table (128)
+
     lidar_path_tar = os.path.join(input_root, 'lidar_raw', f"{clip_id}.tar")
     if not os.path.exists(lidar_path_tar):
         print(f"Skip: {lidar_path_tar} not found")
@@ -153,48 +183,54 @@ def process_clip(clip_id, input_root, metadata_output_root, rangemap_output_root
     lidar_keys = [k for k in lidar_data.keys() if 'lidar_raw' in k]
     frame_indices = sorted(set(k.split('.')[0] for k in lidar_keys), key=natural_key)
 
+    # Pre-load all frames
+    frame_data = {}  # frame_idx -> (xyz_vehicle, vehicle_to_world, timestamp)
+    for idx, frame_idx in enumerate(frame_indices):
+        lidar_raw_key = f"{frame_idx}.lidar_raw.npz"
+        if lidar_raw_key not in lidar_data:
+            continue
+        lidar_raw = lidar_data[lidar_raw_key]
+        xyz_vehicle = lidar_raw['xyz'].astype(np.float32)
+        vehicle_to_world = lidar_raw['lidar_to_world'].astype(np.float64)  # actually vehicle_to_world
+        if ts_dict and frame_idx in ts_dict:
+            timestamp = ts_dict[frame_idx]
+        else:
+            timestamp = idx * 100000
+        frame_data[frame_idx] = (xyz_vehicle, vehicle_to_world, timestamp)
+
+    valid_frame_indices = [f for f in frame_indices if f in frame_data]
+
     usable_frame_indices = []
     pose_list = []
     timestamps_list = []
     range_map_npz = {'__key__': clip_id}
 
-    for idx, frame_idx in enumerate(frame_indices):
-        lidar_raw_key = f"{frame_idx}.lidar_raw.npz"
-        if lidar_raw_key not in lidar_data:
-            continue
+    rot = vehicle_to_lidar[:3, :3]
+    trans = vehicle_to_lidar[:3, 3:4]
 
-        lidar_raw = lidar_data[lidar_raw_key]
-        xyz = lidar_raw['xyz'].astype(np.float32)
-        ego_pose = lidar_raw['lidar_to_world'].astype(np.float32)
+    for idx, frame_idx in enumerate(valid_frame_indices):
+        xyz_vehicle, vehicle_to_world, current_timestamp = frame_data[frame_idx]
 
-        # Get timestamp: use real timestamps if available, otherwise synthesize from
-        # sequential index (idx). Waymo runs at 10Hz so each frame is 100ms apart.
-        # Note: frame_idx may be non-sequential (e.g. 0,3,6,...) so we use idx instead.
-        if ts_dict and frame_idx in ts_dict:
-            current_timestamp = ts_dict[frame_idx]
-        else:
-            current_timestamp = idx * 100000  # 100ms per frame at 10Hz, in microseconds
+        # Transform xyz: vehicle frame -> LiDAR sensor frame
+        xyz_lidar = (rot @ xyz_vehicle.T + trans).T.astype(np.float32)
 
-        # Need next frame for pose pair (last frame is intentionally excluded because
-        # there is no next-frame pose available for motion compensation)
-        if idx < len(frame_indices) - 1:
-            next_frame_idx = frame_indices[idx + 1]
-            next_key = f"{next_frame_idx}.lidar_raw.npz"
-            if next_key not in lidar_data:
-                continue
-            next_raw = lidar_data[next_key]
-            next_pose = next_raw['lidar_to_world'].astype(np.float32)
-            if ts_dict and next_frame_idx in ts_dict:
-                next_timestamp = ts_dict[next_frame_idx]
-            else:
-                next_timestamp = (idx + 1) * 100000
+        # Compose pose: lidar_sensor_to_world = vehicle_to_world @ lidar_extrinsic
+        lidar_to_world = vehicle_to_world @ lidar_extrinsic
+
+        # Get next frame pose (for last frame, duplicate current)
+        if idx < len(valid_frame_indices) - 1:
+            next_frame_idx = valid_frame_indices[idx + 1]
+            _, next_vehicle_to_world, next_timestamp = frame_data[next_frame_idx]
             if next_timestamp <= current_timestamp:
                 continue
+            next_lidar_to_world = next_vehicle_to_world @ lidar_extrinsic
         else:
-            continue
+            # Last frame: duplicate own pose and timestamp + delta
+            next_lidar_to_world = lidar_to_world.copy()
+            next_timestamp = current_timestamp + 100000
 
-        # Project xyz to range map
-        range_map = points_to_range_map(xyz, n_rows, n_cols, sensor_elevation_angles)
+        # Project LiDAR-frame xyz to range map
+        range_map = points_to_range_map(xyz_lidar, n_rows, n_cols, elevation_angles_deg)
 
         # Extract sparse representation
         valid_pixels = np.where(range_map > 0)
@@ -207,7 +243,7 @@ def process_clip(clip_id, input_root, metadata_output_root, rangemap_output_root
         range_map_npz[f'{frame_idx}.lidar_range.npz'] = {'arr_0': lidar_range.astype(np.float16)}
 
         usable_frame_indices.append(frame_idx)
-        pose_list.append([ego_pose, next_pose])
+        pose_list.append([lidar_to_world, next_lidar_to_world])
         timestamps_list.append([current_timestamp, next_timestamp])
 
     if not usable_frame_indices:
@@ -218,7 +254,7 @@ def process_clip(clip_id, input_root, metadata_output_root, rangemap_output_root
     tar_path = os.path.join(rangemap_output_root, f"{clip_id}.tar")
     write_to_tar(range_map_npz, tar_path)
 
-    # Save metadata with proper dtypes (avoid object arrays that need allow_pickle)
+    # Save metadata
     os.makedirs(metadata_output_root, exist_ok=True)
     metadata_path = os.path.join(metadata_output_root, f"{clip_id}")
     np.savez(
@@ -231,33 +267,48 @@ def process_clip(clip_id, input_root, metadata_output_root, rangemap_output_root
     return True
 
 
+def process_clip_worker(args):
+    """Multiprocessing wrapper for per-clip conversion."""
+    clip_id, input_root, metadata_output_root, rangemap_output_root, elevation_angles_deg, vehicle_to_lidar, lidar_extrinsic, n_cols = args
+    try:
+        ok = process_clip(
+            clip_id,
+            input_root,
+            metadata_output_root,
+            rangemap_output_root,
+            elevation_angles_deg,
+            vehicle_to_lidar,
+            lidar_extrinsic,
+            n_cols,
+        )
+        return clip_id, ok, None
+    except Exception as exc:
+        return clip_id, False, str(exc)
+
+
 @click.command()
 @click.option("--input_root", type=str, required=True, help="Root of rds_hq_waymo split (e.g. /data2/rds_hq_waymo/training)")
 @click.option("--output_root", type=str, required=True, help="Output root (e.g. /data2/rds_hq_waymo/lidar_tokenizer/training)")
 @click.option("--split_file", type=str, default=None, help="Optional split file listing clip tar filenames")
-@click.option("--sensor_params", type=str, default=None, help="Sensor parameter JSON file (default: use uniform FOV for Waymo)")
-@click.option("--fov_min", type=float, default=-3.0, help="Min elevation angle in degrees (for uniform mode)")
-@click.option("--fov_max", type=float, default=20.0, help="Max elevation angle in degrees (for uniform mode)")
-@click.option("--n_rows", type=int, default=128)
+@click.option("--n_rows", type=int, default=128, show_default=True, help="Tokenizer-compatible range map height")
 @click.option("--n_cols", type=int, default=3600)
-def main(input_root, output_root, split_file, sensor_params, fov_min, fov_max, n_rows, n_cols):
+@click.option("--num_workers", type=int, default=8, show_default=True, help="Number of clip-level worker processes")
+def main(input_root, output_root, split_file, n_rows, n_cols, num_workers):
     metadata_output_root = os.path.join(output_root, "metadata")
     rangemap_output_root = os.path.join(output_root, "lidar")
     os.makedirs(metadata_output_root, exist_ok=True)
     os.makedirs(rangemap_output_root, exist_ok=True)
 
-    # Load or generate sensor elevation angles
-    if sensor_params:
-        sensor_elevation_angles = load_sensor_elevation_angles(sensor_params)
-        if len(sensor_elevation_angles) != n_rows:
-            raise ValueError(
-                f"Sensor params have {len(sensor_elevation_angles)} elevation angles "
-                f"but n_rows={n_rows}. These must match to avoid index errors."
-            )
-    else:
-        sensor_elevation_angles = make_uniform_elevation_angles(n_rows, fov_min, fov_max)
-    print(f"Sensor elevation angles: {len(sensor_elevation_angles)} rows, "
-          f"range [{sensor_elevation_angles.min():.1f}, {sensor_elevation_angles.max():.1f}] degrees")
+    if n_rows != 128:
+        raise ValueError(f"Waymo tokenizer conversion currently expects n_rows=128, got {n_rows}")
+
+    lidar_extrinsic = WAYMO_TOP_LIDAR_EXTRINSIC
+    vehicle_to_lidar = np.linalg.inv(lidar_extrinsic)
+
+    # Create 128 elevation angles from 64 Waymo TOP beams (descending, matching Pandar128)
+    elevation_angles_deg = make_elevation_angles(WAYMO_TOP_BEAM_INCLINATIONS_RAD, n_rows)
+    print(f"Elevation angles: {len(elevation_angles_deg)} rows, "
+          f"range [{elevation_angles_deg.min():.2f}, {elevation_angles_deg.max():.2f}] degrees")
 
     # Get clip list
     if split_file:
@@ -271,16 +322,41 @@ def main(input_root, output_root, split_file, sensor_params, fov_min, fov_max, n
 
     success = 0
     failed = []
-    for clip_id in tqdm(clip_list, desc="Processing clips"):
-        try:
-            if process_clip(clip_id, input_root, metadata_output_root, rangemap_output_root,
-                           sensor_elevation_angles, n_rows, n_cols):
+    num_workers = max(1, num_workers)
+    worker_args = [
+        (
+            clip_id,
+            input_root,
+            metadata_output_root,
+            rangemap_output_root,
+            elevation_angles_deg,
+            vehicle_to_lidar,
+            lidar_extrinsic,
+            n_cols,
+        )
+        for clip_id in clip_list
+    ]
+
+    if num_workers == 1:
+        for args in tqdm(worker_args, desc="Processing clips"):
+            clip_id, ok, error = process_clip_worker(args)
+            if ok:
                 success += 1
             else:
+                if error is not None:
+                    print(f"Error processing {clip_id}: {error}")
                 failed.append(clip_id)
-        except Exception as e:
-            print(f"Error processing {clip_id}: {e}")
-            failed.append(clip_id)
+    else:
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(process_clip_worker, args) for args in worker_args]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing clips"):
+                clip_id, ok, error = future.result()
+                if ok:
+                    success += 1
+                else:
+                    if error is not None:
+                        print(f"Error processing {clip_id}: {error}")
+                    failed.append(clip_id)
 
     print(f"\nDone: {success}/{len(clip_list)} clips processed successfully")
     if failed:

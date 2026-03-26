@@ -127,6 +127,35 @@ def load_pandar128_elevations():
     return elevations  # load the elevation angles
 
 
+# Waymo TOP LiDAR: 64 non-uniform beam inclinations (radians), ordered high-to-low elevation
+WAYMO_TOP_BEAM_INCLINATIONS_RAD = np.array([
+     0.03849,  0.03570,  0.03231,  0.02941,  0.02658,  0.02379,  0.02089,
+     0.01803,  0.01460,  0.01198,  0.00899,  0.00617,  0.00329,  0.00055,
+    -0.00268, -0.00545, -0.00849, -0.01113, -0.01419, -0.01682, -0.02016,
+    -0.02294, -0.02590, -0.02894, -0.03222, -0.03554, -0.03962, -0.04336,
+    -0.04745, -0.05171, -0.05606, -0.06060, -0.06619, -0.07076, -0.07635,
+    -0.08161, -0.08721, -0.09276, -0.09927, -0.10564, -0.11206, -0.11833,
+    -0.12536, -0.13210, -0.13941, -0.14685, -0.15429, -0.16180, -0.16976,
+    -0.17758, -0.18603, -0.19431, -0.20291, -0.21142, -0.22096, -0.22990,
+    -0.23938, -0.24864, -0.25816, -0.26761, -0.27795, -0.28828, -0.29886,
+    -0.30935,
+], dtype=np.float64)
+
+
+def make_waymo_top_elevation_angles_128():
+    """Create 128 elevation angles by interpolating 64 Waymo TOP LiDAR beams.
+
+    Returns descending elevation angles in degrees (high-to-low), matching Pandar128 convention.
+    Row 0 = highest elevation (+2.21°), Row 127 = lowest elevation (-17.72°).
+    """
+    beam_deg = np.rad2deg(WAYMO_TOP_BEAM_INCLINATIONS_RAD)
+    beam_asc = beam_deg[::-1]  # ascending for interpolation
+    x_orig = np.linspace(0, 1, len(beam_asc))
+    x_new = np.linspace(0, 1, 128)
+    elevation_128 = np.interp(x_new, x_orig, beam_asc)
+    return elevation_128[::-1].copy()  # descending: +2.21 ... -17.72
+
+
 def undo_row_col_temporal_repeat(range_map, repeat_row, repeat_col, repeat_temporal=None):
     """
     range_map: numpy array of shape (N, 3, H, W) / N, 3, T, H, W

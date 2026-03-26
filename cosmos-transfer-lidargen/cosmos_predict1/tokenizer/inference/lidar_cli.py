@@ -34,6 +34,20 @@ from cosmos_predict1.utils.visualize.video import save_images_to_video, stack_vi
 from cosmos_predict1.utils.lidar_rangemap import save_depth_maps_to_video
 from cosmos_predict1.utils.misc import natural_key
 
+WAYMO_TOP_LIDAR_EXTRINSIC = np.array([
+    [-8.4777248e-01, -5.3035414e-01, -2.5136571e-03,  1.4299999e+00],
+    [ 5.3035545e-01, -8.4777534e-01,  1.8014426e-04,  0.0000000e+00],
+    [-2.2265569e-03, -1.1804104e-03,  9.9999684e-01,  2.1840000e+00],
+    [ 0.0000000e+00,  0.0000000e+00,  0.0000000e+00,  1.0000000e+00],
+], dtype=np.float64)
+
+
+def transform_points_to_vehicle_frame(points: np.ndarray) -> np.ndarray:
+    rot = WAYMO_TOP_LIDAR_EXTRINSIC[:3, :3]
+    trans = WAYMO_TOP_LIDAR_EXTRINSIC[:3, 3]
+    return (points @ rot.T) + trans
+
+
 def render_each_lidar(args):
     frame_idx, original_pts, recon_pts, save_folder = args
     n_pts = original_pts.shape[0]
@@ -66,6 +80,12 @@ def _args_parser():
     parser.add_argument("--max_range", type=float, default=100, help="max range")
     parser.add_argument("--min_range", type=float, default=5, help="min range")
     parser.add_argument("--colormap", type=str, default="Spectral", help="Colormap to apply to depth maps.")
+    parser.add_argument("--waymo_top", action="store_true", help="Use Waymo TOP LiDAR beam inclinations (64 beams interpolated to 128)")
+    parser.add_argument("--uniform_fov", action="store_true", help="Use uniform FOV elevation angles")
+    parser.add_argument("--display_frame", type=str, default="vehicle", choices=["lidar", "vehicle"],
+                        help="Frame used for point-cloud visualization")
+    parser.add_argument("--fov_min", type=float, default=-17.72, help="Min elevation angle in degrees (for uniform FOV)")
+    parser.add_argument("--fov_max", type=float, default=2.21, help="Max elevation angle in degrees (for uniform FOV)")
     args = parser.parse_args()
     return args
 
@@ -74,6 +94,14 @@ def eval_sample(args):
     dump_dir = os.path.join("dump_results/lidar_tokenizer", args.output_folder)
     os.makedirs(dump_dir, exist_ok=True)
   
+    elevation_angles = None
+    if args.waymo_top:
+        from cosmos_predict1.utils.lidar_rangemap import make_waymo_top_elevation_angles_128
+        elevation_angles = make_waymo_top_elevation_angles_128()
+    elif args.uniform_fov:
+        n_rows = 128
+        elevation_angles = np.linspace(args.fov_min, args.fov_max, n_rows)
+
     lidar_processor = LidarProcessor(
         checkpoint_enc=args.enc_path,
         checkpoint_dec=args.dec_path,
@@ -85,6 +113,7 @@ def eval_sample(args):
         max_range=args.max_range,
         min_range=args.min_range,
         dtype=args.tokenizer_dtype,
+        elevation_angles=elevation_angles,
     )
 
     os.makedirs(dump_dir, exist_ok=True)
@@ -127,6 +156,9 @@ def eval_sample(args):
     if args.vis_pcd == 1:
         original_pcd = original_range[..., np.newaxis] * ray_directions  # N x H x W x 3
         recon_pcd = recon_range[..., np.newaxis] * ray_directions
+        if args.display_frame == "vehicle" and args.waymo_top:
+            original_pcd = transform_points_to_vehicle_frame(original_pcd.reshape(-1, 3)).reshape(original_pcd.shape)
+            recon_pcd = transform_points_to_vehicle_frame(recon_pcd.reshape(-1, 3)).reshape(recon_pcd.shape)
         save_folder = f"{dump_dir}/point_cloud/{scene_name}"
         os.makedirs(save_folder, exist_ok=True)
 
