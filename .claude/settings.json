@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//root/workspace/**)",
+      "Bash(grep -r \"64x2650\\\\|128x3600\\\\|range.*image.*shape\\\\|lidar.*dimension\" /root/workspace --include=*.py --include=*.md)",
+      "Bash(find /root/workspace -type f \\\\\\(-name *tokenizer* -o -name *range*image* \\\\\\) -print)"
+    ]
+  }
+}

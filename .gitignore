@@ -1,3 +1,6 @@
 outputs/*
 cosmos-transfer1/checkpoints/*
 __pycache__
+cosmos-transfer-lidargen/assets/lidar/waymo_train_split.lst
+data2
+cosmos-transfer-lidargen/assets/lidar/waymo_val_split.lst

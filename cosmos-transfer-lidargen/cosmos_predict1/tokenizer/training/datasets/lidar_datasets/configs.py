@@ -69,3 +69,27 @@ COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_val"] = deepcopy(
 )
 COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_val"]["lidar_crop_size"] = [-1, -1]
 COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_val"]["sample_n_frames"] = 3
+
+# Waymo dataset configs
+COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_train"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_train"].update({
+    "root_path": "datasets/waymo_lidar_training",
+    "filter_list_path": "assets/lidar/waymo_train_split.lst",
+    "custom_folders": ["datasets/waymo_lidar_training"],
+    "metadata_folder": "datasets/waymo_lidar_training/metadata",
+    "lidar_length": 169,  # Waymo clips: min 171 raw frames, -1 (last frame dropped for pose pair) = 170, -1 margin = 169
+})
+
+COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_val"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_val"].update({
+    "root_path": "datasets/waymo_lidar_validation",
+    "filter_list_path": "assets/lidar/waymo_val_split.lst",
+    "custom_folders": ["datasets/waymo_lidar_validation"],
+    "metadata_folder": "datasets/waymo_lidar_validation/metadata",
+    "lidar_crop_size": [-1, -1],
+    "sample_n_frames": 3,
+})
