@@ -22,6 +22,7 @@ from typing import Any
 import mediapy as media
 import numpy as np
 import torch
+from torch import nn
 
 from cosmos_predict1.tokenizer.networks import TokenizerModels
 
@@ -29,6 +30,24 @@ _DTYPE, _DEVICE = torch.bfloat16, "cuda"
 _UINT8_MAX_F = float(torch.iinfo(torch.uint8).max)
 _SPATIAL_ALIGN = 16
 _TEMPORAL_ALIGN = 8
+
+
+class _TokenizerEncoderAdapter(nn.Module):
+    def __init__(self, full_model: nn.Module):
+        super().__init__()
+        self.full_model = full_model
+
+    def forward(self, x: torch.Tensor):
+        return self.full_model.encode(x)
+
+
+class _TokenizerDecoderAdapter(nn.Module):
+    def __init__(self, full_model: nn.Module):
+        super().__init__()
+        self.full_model = full_model
+
+    def forward(self, z: torch.Tensor):
+        return self.full_model.decode(z)
 
 
 def load_model(
@@ -44,10 +63,10 @@ def load_model(
     Returns:
         The JIT compiled model loaded to device and on eval mode.
     """
-    if tokenizer_config is None:
+    if tokenizer_config is None or _is_jit_checkpoint(jit_filepath):
         return load_jit_model(jit_filepath, device)
     full_model, ckpts = _load_pytorch_model(jit_filepath, tokenizer_config, device)
-    full_model.load_state_dict(ckpts.state_dict(), strict=True)
+    _load_tokenizer_weights(full_model, _extract_model_state_dict(ckpts))
     return full_model.eval().to(device)
 
 
@@ -64,11 +83,14 @@ def load_encoder_model(
     Returns:
         The JIT compiled model loaded to device and on eval mode.
     """
-    if tokenizer_config is None:
+    if tokenizer_config is None or _is_jit_checkpoint(jit_filepath):
         return load_jit_model(jit_filepath, device)
     full_model, ckpts = _load_pytorch_model(jit_filepath, tokenizer_config, device)
-    encoder_model = full_model.encoder_jit()
-    encoder_model.load_state_dict(ckpts.state_dict(), strict=True)
+    _load_tokenizer_weights(full_model, _extract_model_state_dict(ckpts))
+    try:
+        encoder_model = full_model.encoder_jit()
+    except RuntimeError:
+        encoder_model = _TokenizerEncoderAdapter(full_model)
     return encoder_model.eval().to(device)
 
 
@@ -85,11 +107,14 @@ def load_decoder_model(
     Returns:
         The JIT compiled model loaded to device and on eval mode.
     """
-    if tokenizer_config is None:
+    if tokenizer_config is None or _is_jit_checkpoint(jit_filepath):
         return load_jit_model(jit_filepath, device)
     full_model, ckpts = _load_pytorch_model(jit_filepath, tokenizer_config, device)
-    decoder_model = full_model.decoder_jit()
-    decoder_model.load_state_dict(ckpts.state_dict(), strict=True)
+    _load_tokenizer_weights(full_model, _extract_model_state_dict(ckpts))
+    try:
+        decoder_model = full_model.decoder_jit()
+    except RuntimeError:
+        decoder_model = _TokenizerDecoderAdapter(full_model)
     return decoder_model.eval().to(device)
 
 
@@ -105,9 +130,51 @@ def _load_pytorch_model(
         The JIT compiled model loaded to device and on eval mode.
     """
     tokenizer_name = tokenizer_config["name"]
-    model = TokenizerModels[tokenizer_name].value(**tokenizer_config)
-    ckpts = torch.jit.load(jit_filepath, map_location=device)
+    model_cls = _resolve_tokenizer_model(tokenizer_name)
+    model = model_cls(**tokenizer_config)
+    ckpts = torch.load(jit_filepath, map_location=device, weights_only=False)
     return model, ckpts
+
+
+def _resolve_tokenizer_model(tokenizer_name: str):
+    if tokenizer_name in TokenizerModels.__members__:
+        return TokenizerModels[tokenizer_name].value
+
+    normalized_name = tokenizer_name.upper()
+    if "VIDEO" in normalized_name:
+        key = "DV" if "DISCRETE" in normalized_name else "CV"
+    else:
+        key = "DI" if "DISCRETE" in normalized_name else "CI"
+    return TokenizerModels[key].value
+
+
+def _extract_model_state_dict(ckpts: Any) -> dict[str, torch.Tensor]:
+    if isinstance(ckpts, dict) and "model" in ckpts:
+        ckpts = ckpts["model"]
+    if isinstance(ckpts, dict):
+        if any(key.startswith("network.") for key in ckpts):
+            return {key.removeprefix("network."): value for key, value in ckpts.items() if key.startswith("network.")}
+        return ckpts
+    raise TypeError(f"Unsupported checkpoint format: {type(ckpts)}")
+
+
+def _is_jit_checkpoint(filepath: str | None) -> bool:
+    return filepath is not None and filepath.endswith(".jit")
+
+
+def _load_tokenizer_weights(model: nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    allowed_missing_prefixes = (
+        "encoder.patcher",
+        "encoder.patcher3d",
+        "decoder.unpatcher",
+        "decoder.unpatcher3d",
+    )
+    disallowed_missing = [key for key in missing_keys if not key.startswith(allowed_missing_prefixes)]
+    if disallowed_missing or unexpected_keys:
+        raise RuntimeError(
+            f"Checkpoint load mismatch. Missing keys: {disallowed_missing}. Unexpected keys: {list(unexpected_keys)}"
+        )
 
 
 def load_jit_model(jit_filepath: str = None, device: str = "cuda") -> torch.jit.ScriptModule:

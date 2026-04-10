@@ -162,6 +162,7 @@ class LidarRangeMapSampler(Dataset):
         inverse_depth=False,
         to_three_channels="repeat",  # "repeat" or "concat"
         inv_depth_threshold=20,
+        use_standalone_context_frame=False,
         view_indices=None,
     ):
         super().__init__()
@@ -182,7 +183,7 @@ class LidarRangeMapSampler(Dataset):
         self.LIDAR_FPS = LIDAR_FPS
         self.RGB_FPS = RGB_FPS
 
-        self.sample_n_frames = sample_n_frames  # the "actual" target sequence length
+        self.sample_n_frames = sample_n_frames  # number of raw frames sampled from disk
         self.lidar_length = lidar_length
         self.rgb_length = lidar_length * (RGB_FPS // LIDAR_FPS)
         self.frame_sampling_method = frame_sampling_method
@@ -200,6 +201,7 @@ class LidarRangeMapSampler(Dataset):
         self.repeat_row = repeat_row
         self.repeat_col = repeat_col
         self.repeat_temporal = repeat_temporal
+        self.use_standalone_context_frame = use_standalone_context_frame
         self.to_three_channels = to_three_channels
         assert self.to_three_channels in ["repeat", "concat"]
 
@@ -301,8 +303,11 @@ class LidarRangeMapSampler(Dataset):
                 frame_indices = self.sample_random_frames(self.sample_n_frames, self.rgb_length)
             else:
                 frame_indices = self.sample_sequential_frames(
-                    self.sample_n_frames + 1, self.rgb_length
-                )  # + 1 because the video tokenizer will need one more additional frame
+                    self.sample_n_frames
+                    if self.use_standalone_context_frame or not self.is_video_tokenizer
+                    else self.sample_n_frames + 1,
+                    self.rgb_length,
+                )
         return frame_indices
 
     def normalise_and_convert_range_map_to_three_channels(self, range_maps):
@@ -350,13 +355,10 @@ class LidarRangeMapSampler(Dataset):
 
         # if it comes from sequential sampling, then we need to repeat the range maps for  sequence
         if self.frame_sampling_method == "sequential" and self.is_video_tokenizer:
-            first_range_map = range_maps[
-                0
-            ]  # let's just repeat the first frame to make task easier. This is the same practice as when I evaluate the tokenizer
             range_maps = range_maps.repeat(self.repeat_temporal, axis=0)
-            range_maps = np.concatenate(
-                [first_range_map[None], range_maps], axis=0
-            )  # this one will be repeated later on in the encoder
+            if not self.use_standalone_context_frame:
+                first_range_map = range_maps[0]
+                range_maps = np.concatenate([first_range_map[None], range_maps], axis=0)
 
         # to torch tensor
         range_maps = torch.from_numpy(range_maps).float()  # shape: [N, 3, 128 * repeat_row, 1800 * repeat_col]
@@ -521,7 +523,11 @@ class LidarRangeMapSampler(Dataset):
         sample["__key__"] = example["__key__"]
         sample["clip_name"] = "%s-%s-%d" % (self.data_name, example["__key__"], idx)
         sample["data_type"] = "lidar"
-        sample["num_frames"] = self.sample_n_frames + 1 if self.is_video_tokenizer else self.sample_n_frames
+        sample["num_frames"] = (
+            self.sample_n_frames
+            if self.use_standalone_context_frame or not self.is_video_tokenizer
+            else self.sample_n_frames + 1
+        )
         sample["is_preprocessed"] = True
         sample["image_size"] = torch.tensor(self.lidar_size)
         sample["padding_mask"] = torch.zeros(1, self.lidar_size[0], self.lidar_size[1])

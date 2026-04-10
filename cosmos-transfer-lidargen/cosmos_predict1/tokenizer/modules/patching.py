@@ -174,6 +174,31 @@ class Patcher3D(Patcher):
         ).contiguous()
         return x
 
+    def _prepare_streaming_input(self, x: torch.Tensor, is_first_chunk: bool) -> torch.Tensor:
+        if is_first_chunk:
+            xi, xv = torch.split(x, [1, x.shape[2] - 1], dim=2)
+            return torch.cat([xi.repeat_interleave(self.patch_size, dim=2), xv], dim=2)
+        remainder = x.shape[2] % self.patch_size
+        if remainder != 0:
+            x = torch.cat([x, x[:, :, -1:, ...].repeat_interleave(self.patch_size - remainder, dim=2)], dim=2)
+        return x
+
+    def forward_streaming(self, x: torch.Tensor, is_first_chunk: bool) -> torch.Tensor:
+        x = self._prepare_streaming_input(x, is_first_chunk=is_first_chunk)
+        if self.patch_method == "haar":
+            for _ in self.range:
+                x = self._dwt(x, "haar", rescale=True)
+            return x
+        if self.patch_method == "rearrange":
+            return rearrange(
+                x,
+                "b c (t p1) (h p2) (w p3) -> b (c p1 p2 p3) t h w",
+                p1=self.patch_size,
+                p2=self.patch_size,
+                p3=self.patch_size,
+            ).contiguous()
+        raise ValueError("Unknown patch method: " + self.patch_method)
+
 
 class UnPatcher(torch.nn.Module):
     """A module to convert patches into image tensorsusing torch operations.
@@ -308,4 +333,22 @@ class UnPatcher3D(UnPatcher):
             p3=self.patch_size,
         )
         x = x[:, :, self.patch_size - 1 :, ...]
+        return x
+
+    def forward_streaming(self, x: torch.Tensor, is_first_chunk: bool) -> torch.Tensor:
+        if self.patch_method == "haar":
+            for _ in self.range:
+                x = self._idwt(x, "haar", rescale=True)
+        elif self.patch_method == "rearrange":
+            x = rearrange(
+                x,
+                "b (c p1 p2 p3) t h w -> b c (t p1) (h p2) (w p3)",
+                p1=self.patch_size,
+                p2=self.patch_size,
+                p3=self.patch_size,
+            )
+        else:
+            raise ValueError("Unknown patch method: " + self.patch_method)
+        if is_first_chunk:
+            x = x[:, :, self.patch_size - 1 :, ...]
         return x

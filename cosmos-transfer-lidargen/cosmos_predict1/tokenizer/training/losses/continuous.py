@@ -46,17 +46,11 @@ class TokenizerLoss(nn.Module):
         loss = dict()
         total_loss = 0.0
 
-        inputs[MASK_KEY] = torch.ones_like(inputs[INPUT_KEY])
         # Calculates reconstruction losses (`total_loss`).
         for key, module in self.loss_modules.items():
             curr_loss = module(inputs, output_batch, iteration)
             loss.update({k: torch.mean(v) for k, v in curr_loss.items()})
             total_loss += sum([self.reduce(v) if (v.dim() > 0) else v for v in curr_loss.values()])
-
-        loss.update({k: torch.mean(v) for k, v in curr_loss.items()})
-
-        # Computes the overall loss as sum of the reconstruction losses and the generator loss.
-        total_loss += sum([self.reduce(v) if (v.dim() > 0) else v for v in curr_loss.values()])
         return dict(loss=loss), total_loss
 
 
@@ -129,8 +123,15 @@ class PerceptualLoss(LPIPS):
     """
 
     def __init__(self, config):
-        super(PerceptualLoss, self).__init__(config.checkpoint_activations)
-        self.net = self.net.eval()
+        self.enabled = getattr(config, "enabled", True)
+        if not self.enabled:
+            nn.Module.__init__(self)
+            self.net = None
+            self.scaling_layer = None
+            self.chns = []
+        else:
+            super(PerceptualLoss, self).__init__(config.checkpoint_activations)
+            self.net = self.net.eval()
         self.gram_enabled = config.gram_enabled
         self.corr_enabled = config.corr_enabled
         self.layer_weights = list(config.layer_weights)
@@ -154,6 +155,17 @@ class PerceptualLoss(LPIPS):
 
     def forward(self, inputs, output_batch, iteration):
         output_dict = dict()
+        if not self.enabled:
+            return output_dict
+
+        lpips_weight = self.lpips_schedule(iteration)
+        gram_weight = self.gram_schedule(iteration)
+        corr_weight = self.corr_schedule(iteration)
+        if lpips_weight == 0.0 and (not self.gram_enabled or gram_weight == 0.0) and (
+            not self.corr_enabled or corr_weight == 0.0
+        ):
+            return output_dict
+
         reconstructions = output_batch[RECON_KEY]
         weights = inputs[MASK_KEY]
         input_images = inputs[INPUT_KEY]
@@ -184,9 +196,9 @@ class PerceptualLoss(LPIPS):
             val = batch2time(val, batch_size)
         if torch.isnan(val).any():
             raise ValueError("[LPIPS] NaN detected in loss")
-        output_dict["lpips"] = self.lpips_schedule(iteration) * val
+        output_dict["lpips"] = lpips_weight * val
 
-        if self.gram_enabled and self.gram_schedule(iteration) > 0.0:
+        if self.gram_enabled and gram_weight > 0.0:
             num_chans = len(self.chns)
             grams0 = [self._gram_matrix(weights_map[kk] * outs0[kk], batch_size) for kk in range(num_chans)]
             grams1 = [self._gram_matrix(weights_map[kk] * outs1[kk], batch_size) for kk in range(num_chans)]
@@ -204,7 +216,7 @@ class PerceptualLoss(LPIPS):
                 gram_val = batch2time(gram_val, batch_size)
             if torch.isnan(gram_val).any():
                 raise ValueError("[GRAM] NaN detected in loss")
-            output_dict["gram"] = self.gram_schedule(iteration) * gram_val
+            output_dict["gram"] = gram_weight * gram_val
         return output_dict
 
     def torch_compile(self):
@@ -212,7 +224,8 @@ class PerceptualLoss(LPIPS):
         This method invokes torch.compile() on this loss
         """
         # cuda-graphs crash after 1k iterations
-        self.net = torch.compile(self.net, dynamic=False)
+        if self.net is not None:
+            self.net = torch.compile(self.net, dynamic=False)
 
 
 class FlowLoss(torch.nn.Module):
@@ -223,8 +236,15 @@ class FlowLoss(torch.nn.Module):
         self.dtype = getattr(torch, config.dtype)
         self.checkpoint_activations = config.checkpoint_activations
         self.enabled = config.enabled
+        self.flow_model = None
 
-        current_device = torch.device(torch.cuda.current_device())
+        # Keep FlowLoss completely inert when disabled so training does not
+        # trigger unnecessary RAFT initialization or checkpoint downloads.
+        if not self.enabled:
+            return
+
+    def _init_flow_model(self, device: torch.device) -> None:
+        current_device = torch.device(device)
 
         # In order to be able to run model in bf16 we need to change make_coords_grid()
         # to allow it to return arbitrary type provided by us in argument
@@ -292,7 +312,7 @@ class FlowLoss(torch.nn.Module):
         flow_model = optical_flow.raft_large(pretrained=True, progress=False)
         flow_model.requires_grad_(False)
         flow_model.eval()
-        flow_model = flow_model.to(self.dtype)
+        flow_model = flow_model.to(device=current_device, dtype=self.dtype)
 
         self.flow_model = flow_model
 
@@ -366,8 +386,11 @@ class FlowLoss(torch.nn.Module):
         input_images = inputs[INPUT_KEY]
         if input_images.ndim == 4 or input_images.shape[2] == 1:
             return dict()
-        if not self.enabled or self.schedule(iteration) == 0.0:
+        curr_weight = self.schedule(iteration)
+        if not self.enabled or curr_weight == 0.0:
             return dict()
+        if self.flow_model is None:
+            self._init_flow_model(input_images.device)
 
         # Biderectional flow (B, 2, 2*(T-1), H, W)
         flow_input = self._bidirectional_flow(input_images)
@@ -376,7 +399,7 @@ class FlowLoss(torch.nn.Module):
         # L1 loss on the flow. (B, 1, 2*(T-1), H, W)
         flow_loss = torch.abs(flow_input - flow_recon).mean(dim=1, keepdim=True)
 
-        flow_loss_weighted = self.schedule(iteration) * flow_loss
+        flow_loss_weighted = curr_weight * flow_loss
         if torch.isnan(flow_loss_weighted).any():
             raise ValueError("[FLOW] NaN detected in loss")
         return dict(flow=flow_loss_weighted)
@@ -385,7 +408,8 @@ class FlowLoss(torch.nn.Module):
         """
         This method invokes torch.compile() on this loss
         """
-        self.flow_model = torch.compile(self.flow_model, dynamic=False)
+        if self.flow_model is not None:
+            self.flow_model = torch.compile(self.flow_model, dynamic=False)
 
 
 class VideoConsistencyLoss(torch.nn.Module):

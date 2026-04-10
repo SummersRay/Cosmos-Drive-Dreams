@@ -51,6 +51,7 @@ class KLConfig:
 
 @attrs.define(slots=False)
 class PerceptualConfig:
+    enabled: bool = True
     lpips_boundaries: list[int] = [500000]
     lpips_values: list[float] = [0.1, 0.073]
     # Layer weights for linearly combining the multi-layer vgg-based losses.

@@ -102,6 +102,9 @@ class WandBLidarCallback(callback.Callback):
     def __init__(self, config: Config, trainer: Trainer):
         super().__init__(config, trainer)
 
+    def _should_generate_media(self) -> bool:
+        return distributed.is_rank0() and self.config.job.wandb_mode != "disabled"
+
     def on_train_start(self, model: Model, iteration: int = 0) -> None:
         wandb_utils.init_wandb(self.config, model=model)
         if distributed.is_rank0():
@@ -172,21 +175,24 @@ class WandBLidarCallback(callback.Callback):
 
         input_images = data_batch[_input_key].float()  # shape: [N, 3, H, w]
         output_images = output_batch[PREDICTION].float()
+        generate_media = self._should_generate_media()
+        wandb_media = None
 
-        result_image = torch.cat((input_images, output_images), dim=-1)
-        
-        if result_image.ndim == 5 and result_image.shape[2] > 1:
-            wandb_media = wandb_video(result_image, iteration)
-        elif result_image.ndim == 5 and result_image.shape[2] == 1:
-            wandb_media = wandb_image(result_image[:, :, 0, ...], iteration)
-        else:
-            wandb_media = wandb_image(result_image, iteration)
+        if generate_media:
+            result_image = torch.cat((input_images, output_images), dim=-1)
+            if result_image.ndim == 5 and result_image.shape[2] > 1:
+                wandb_media = wandb_video(result_image, iteration)
+            elif result_image.ndim == 5 and result_image.shape[2] == 1:
+                wandb_media = wandb_image(result_image[:, :, 0, ...], iteration)
+            else:
+                wandb_media = wandb_image(result_image, iteration)
 
         # get the range_map
         dataset_name = self.config.dataloader_val.dataset.dataset_name
         dataset_config = COMMONDATA_CONFIG[dataset_name]
         is_lidar = data_batch["data_type"][0] == "lidar"
         assert dataset_config["min_value"] == -1
+        wandb_range_map_media = None
         if is_lidar:
             # clamp the input and output images to the range
             input_images = torch.clamp(input_images, -1, 1)
@@ -232,10 +238,11 @@ class WandBLidarCallback(callback.Callback):
 
             valid_mask = valid_mask_input & valid_mask_recon
 
-            if input_images.ndim == 3:  # image tokenizer
-                wandb_range_map_media = wandb_range_image(input_images, output_images)
-            elif input_images.ndim == 4:  # video tokenizer
-                wandb_range_map_media = wandb_range_video(input_images, output_images)
+            if generate_media:
+                if input_images.ndim == 3:  # image tokenizer
+                    wandb_range_map_media = wandb_range_image(input_images, output_images)
+                elif input_images.ndim == 4:  # video tokenizer
+                    wandb_range_map_media = wandb_range_video(input_images, output_images)
 
             range_map_input = input_images[valid_mask]
             range_map_recon = output_images[valid_mask]
@@ -262,12 +269,12 @@ class WandBLidarCallback(callback.Callback):
                 metric_val = output_batch["metric"][metric_key]
                 wandb.log({f"val/{metric_key.upper()}": metric_val}, step=iteration)
 
-            if is_lidar:
+            if generate_media and is_lidar:
                 wandb.log({"val/lidar_reconstruction": [wandb_media]}, step=iteration)
-            else:
+            elif generate_media:
                 wandb.log({"val/rgb_reconstruction": [wandb_media]}, step=iteration)
 
-            if wandb_range_map_media is not None:
+            if generate_media and wandb_range_map_media is not None:
                 wandb.log({"val/range_map": [wandb_range_map_media]}, step=iteration)
 
     def on_before_dataloading(self, iteration: int = 0) -> None:

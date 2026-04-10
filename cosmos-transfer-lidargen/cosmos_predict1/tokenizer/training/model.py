@@ -22,6 +22,7 @@ import torch
 from cosmos_predict1.tokenizer.training.datasets.utils import IMAGE_KEY, INPUT_KEY, MASK_KEY, RECON_KEY, VIDEO_KEY
 from cosmos_predict1.tokenizer.training.losses.continuous import RECON_CONSISTENCY_KEY, VIDEO_CONSISTENCY_LOSS
 from cosmos_predict1.utils import ema
+from cosmos_predict1.utils import log
 from cosmos_predict1.utils.lazy_config import LazyDict, instantiate
 from cosmos_predict1.utils.model import Model
 
@@ -103,15 +104,30 @@ class TokenizerModel(Model):
 
     def load_state_dict(self, state_dict: Any, strict: bool = True) -> None:
         own_state = self.state_dict()
-        filtered_state_dict = {k: v for k, v in state_dict.items() if k in own_state}
+        filtered_state_dict = {}
+        mismatched_keys = {}
+        for key, value in state_dict.items():
+            if key not in own_state:
+                continue
+            if own_state[key].shape != value.shape:
+                mismatched_keys[key] = (tuple(value.shape), tuple(own_state[key].shape))
+                continue
+            filtered_state_dict[key] = value
 
         # Load only filtered state dict.
         super(TokenizerModel, self).load_state_dict(filtered_state_dict, strict=False)
 
         # If strict is True, ensure all parameters are loaded (except the excluded ones)
         missing_keys = set(own_state.keys()) - set(filtered_state_dict.keys())
+        if mismatched_keys and not strict:
+            mismatch_summary = ", ".join(
+                f"{key} {src_shape}->{dst_shape}" for key, (src_shape, dst_shape) in mismatched_keys.items()
+            )
+            log.warning(f"Skipping {len(mismatched_keys)} checkpoint tensors with mismatched shapes: {mismatch_summary}")
         if missing_keys and strict:
             raise KeyError(f"Missing keys in state_dict: {missing_keys}")
+        if mismatched_keys and strict:
+            raise KeyError(f"Mismatched checkpoint tensor shapes: {mismatched_keys}")
 
     def _on_before_network_forward(self, data_batch: dict[str, torch.Tensor]) -> None:
         consistency_loss = self.loss.loss_modules[VIDEO_CONSISTENCY_LOSS]
@@ -140,7 +156,7 @@ class TokenizerModel(Model):
                 data_batch["images"] = data_batch["images"].squeeze(0)
                 assert data_batch["images"].size(1) == 3
         elif self.get_input_key(data_batch) == "video":  # the model takes as input (B, C, T, H, W)
-            if data_batch["video"].size(2) == 3:
+            if data_batch["video"].size(1) != 3 and data_batch["video"].size(2) == 3:
                 data_batch["video"] = data_batch["video"].permute(0, 2, 1, 3, 4)
         
         self._on_before_network_forward(data_batch)

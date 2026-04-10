@@ -15,6 +15,7 @@
 
 
 import argparse
+import ast
 import os
 import tarfile
 from glob import glob
@@ -22,6 +23,7 @@ from multiprocessing import Pool
 
 import matplotlib.pyplot as plt
 import numpy as np
+from omegaconf import OmegaConf
 import torch
 
 # import open3d as o3d
@@ -40,6 +42,19 @@ WAYMO_TOP_LIDAR_EXTRINSIC = np.array([
     [-2.2265569e-03, -1.1804104e-03,  9.9999684e-01,  2.1840000e+00],
     [ 0.0000000e+00,  0.0000000e+00,  0.0000000e+00,  1.0000000e+00],
 ], dtype=np.float64)
+
+
+def _normalize_config_value(value):
+    if isinstance(value, dict):
+        return {key: _normalize_config_value(sub_value) for key, sub_value in value.items()}
+    if isinstance(value, list):
+        return [_normalize_config_value(item) for item in value]
+    if isinstance(value, str):
+        try:
+            return ast.literal_eval(value)
+        except (ValueError, SyntaxError):
+            return value
+    return value
 
 
 def transform_points_to_vehicle_frame(points: np.ndarray) -> np.ndarray:
@@ -63,16 +78,46 @@ def render_each_lidar(args):
 def _args_parser():
     parser = argparse.ArgumentParser(description="Process range images and create videos.")
     parser.add_argument("--sample_path", type=str, help="Path to the sample range image.")
+    parser.add_argument("--model_path", type=str, default=None, help="Path to the full tokenizer checkpoint (.jit or .pt).")
     parser.add_argument("--enc_path", type=str, help="Path to the encoder checkpoint.")
     parser.add_argument("--dec_path", type=str, help="Path to the decoder checkpoint.")
+    parser.add_argument(
+        "--tokenizer_config_path",
+        type=str,
+        default=None,
+        help="Path to the saved training config.yaml. Required when --model_path points to a non-JIT .pt checkpoint.",
+    )
     parser.add_argument("--output_folder", type=str, help="Path to the dump folder.")
+    parser.add_argument(
+        "--tokenizer_type",
+        type=str,
+        default="image",
+        choices=["image", "video"],
+        help="Whether the encoder/decoder pair is an image tokenizer or a temporal video tokenizer.",
+    )
     parser.add_argument("--vis_pcd", type=int, default=1, help="Visualize the point cloud.")
     parser.add_argument("--tokenizer_dtype", type=str, default="bfloat16", help="tokenizer dtype")
     parser.add_argument("--n_rows_repeat", type=int, default=4, help="Number of times to repeat each row in the image.")
     parser.add_argument(
         "--n_cols_repeat", type=int, default=1, help="Number of times to repeat each column in the image."
     )
-    parser.add_argument("--max_frames", type=int, default=20, help="Number of frames to use.")
+    parser.add_argument(
+        "--temporal_window",
+        type=int,
+        default=9,
+        help="Total model input length used only for --tokenizer_type video. For strict streaming models this must satisfy `1+4k`, so common choices are 9, 17, and 29.",
+    )
+    parser.add_argument(
+        "--legacy_duplicate_context",
+        action="store_true",
+        help="Use the old pre-alignment behavior that duplicates the first frame inside each chunk before tokenization.",
+    )
+    parser.add_argument(
+        "--max_frames",
+        type=int,
+        default=20,
+        help="Number of frames to use. For strict streaming video models, this should also satisfy `1+4k`; matching --temporal_window is the safest choice.",
+    )
     parser.add_argument("--fps", type=int, default=10, help="FPS of the video.")
     parser.add_argument("--downsample_factor_row", type=int, default=1, help="Downsample factor.")
     parser.add_argument("--downsample_factor_col", type=int, default=2, help="Downsample factor.")
@@ -95,6 +140,7 @@ def eval_sample(args):
     os.makedirs(dump_dir, exist_ok=True)
   
     elevation_angles = None
+    tokenizer_config = None
     if args.waymo_top:
         from cosmos_predict1.utils.lidar_rangemap import make_waymo_top_elevation_angles_128
         elevation_angles = make_waymo_top_elevation_angles_128()
@@ -102,9 +148,17 @@ def eval_sample(args):
         n_rows = 128
         elevation_angles = np.linspace(args.fov_min, args.fov_max, n_rows)
 
+    if args.model_path is not None and args.model_path.endswith(".pt"):
+        if args.tokenizer_config_path is None:
+            raise ValueError("--tokenizer_config_path is required when --model_path uses a .pt checkpoint.")
+        cfg = OmegaConf.load(args.tokenizer_config_path)
+        tokenizer_config = _normalize_config_value(OmegaConf.to_container(cfg.model.config.network, resolve=True))
+
     lidar_processor = LidarProcessor(
+        checkpoint=args.model_path,
         checkpoint_enc=args.enc_path,
         checkpoint_dec=args.dec_path,
+        tokenizer_config=tokenizer_config,
         n_rows_repeat=args.n_rows_repeat,
         n_cols_repeat=args.n_cols_repeat,
         downsample_factor_row=args.downsample_factor_row,
@@ -114,6 +168,9 @@ def eval_sample(args):
         min_range=args.min_range,
         dtype=args.tokenizer_dtype,
         elevation_angles=elevation_angles,
+        tokenizer_type=args.tokenizer_type,
+        temporal_window=args.temporal_window,
+        use_standalone_context_frame=not args.legacy_duplicate_context,
     )
 
     os.makedirs(dump_dir, exist_ok=True)

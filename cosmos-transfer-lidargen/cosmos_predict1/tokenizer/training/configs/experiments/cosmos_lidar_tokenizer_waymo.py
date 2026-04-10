@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from copy import deepcopy
+
 from hydra.core.config_store import ConfigStore
 
 from cosmos_predict1.utils import log
@@ -44,13 +46,30 @@ Cosmos_LidarTokenizer_CI8x8_Waymo: LazyDict = LazyDict(
         trainer=dict(
             max_iter=20000,
             validation_iter=500,
-            max_val_iter=1,
+            max_val_iter=5,
             logging_iter=100,
+        ),
+        dataloader_val=dict(
+            dataset=dict(
+                lidar_crop_size=[-1, 896],
+                frame_sampling_method="sequential_from_zero",
+            ),
         ),
         model=dict(
             config=dict(
                 network=dict(
                     resolution=512,
+                ),
+                loss=dict(
+                    config=dict(
+                        perceptual=dict(
+                            config=dict(
+                                gram_enabled=False,
+                                gram_boundaries=[0],
+                                gram_values=[0.0],
+                            )
+                        )
+                    )
                 ),
                 disc_optimizer=dict(
                     lr=0.00016,
@@ -67,13 +86,304 @@ Cosmos_LidarTokenizer_CI8x8_Waymo: LazyDict = LazyDict(
     )
 )
 
+Cosmos_LidarTokenizer_CV4x8x8_Waymo: LazyDict = LazyDict(
+    dict(
+        defaults=[
+            {"override /network": "continuous_factorized_video"},
+            {"override /loss": "video"},
+            {"override /data_train": "lidar_range_map_video_rRow4_waymo"},
+            {"override /data_val": "lidar_range_map_video_rRow4_waymo"},
+            {"override /optimizer": "fused_adam"},
+            {"override /callbacks": ["basic", "wandbLidar"]},
+            "_self_",
+        ],
+        job=dict(
+            group="tokenizer",
+            name="Cosmos-LidarTokenizer-CV4x8x8-Waymo",
+            wandb_mode="disabled",
+        ),
+        checkpoint=dict(
+            load_path="checkpoints/Cosmos-Tokenizer-CI8x8-Lidar/Cosmos-0.1-Tokenizer-CI8x8/autoencoder.pt",
+            load_training_state=False,
+            save_iter=1000,
+            strict_resume=False,
+            jit=dict(strict=False, dtype="bfloat16", input_shape=[1, 3, 9, 512, 896]),
+        ),
+        trainer=dict(
+            max_iter=20000,
+            validation_iter=500,
+            max_val_iter=1,
+            logging_iter=100,
+        ),
+        model=dict(
+            config=dict(
+                network=dict(
+                    resolution=512,
+                    patch_size=2,
+                    temporal_compression=4,
+                    spatial_compression=8,
+                ),
+                loss=dict(
+                    config=dict(
+                        perceptual=dict(
+                            config=dict(
+                                lpips_boundaries=[1000],
+                                lpips_values=[0.0, 0.1],
+                                gram_enabled=False,
+                                gram_boundaries=[0],
+                            )
+                        ),
+                        video_consistency=dict(
+                            config=dict(
+                                enabled=False,
+                                boundaries=[0],
+                                values=[1.0],
+                                num_frames=9,
+                                step=4,
+                            )
+                        ),
+                        flow=dict(
+                            config=dict(
+                                enabled=False,
+                                boundaries=[1_000_000],
+                                values=[0.0, 0.01],
+                                scale=2,
+                                dtype="bfloat16",
+                                checkpoint_activations=False,
+                            )
+                        ),
+                    )
+                ),
+                disc_optimizer=dict(
+                    lr=0.00016,
+                ),
+                ema=dict(
+                    enabled=False,
+                ),
+                precision="bfloat16",
+            )
+        ),
+        optimizer=dict(
+            lr=0.00004,
+        ),
+    )
+)
+
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29: LazyDict = LazyDict(
+    dict(
+        defaults=[
+            {"override /network": "continuous_factorized_video"},
+            {"override /loss": "video"},
+            {"override /data_train": "lidar_range_map_video_rRow4_waymo_t29"},
+            {"override /data_val": "lidar_range_map_video_rRow4_waymo_t29"},
+            {"override /optimizer": "fused_adam"},
+            {"override /callbacks": ["basic", "wandbLidar"]},
+            "_self_",
+        ],
+        job=dict(
+            group="tokenizer",
+            name="Cosmos-LidarTokenizer-CV4x8x8-Waymo-T29",
+            wandb_mode="disabled",
+        ),
+        checkpoint=dict(
+            load_path="checkpoints/Cosmos-Tokenizer-CI8x8-Lidar/Cosmos-0.1-Tokenizer-CI8x8/autoencoder.pt",
+            load_training_state=False,
+            save_iter=1000,
+            strict_resume=False,
+            jit=dict(strict=False, dtype="bfloat16", input_shape=[1, 3, 29, 512, 832]),
+        ),
+        trainer=dict(
+            max_iter=20000,
+            validation_iter=500,
+            max_val_iter=1,
+            logging_iter=100,
+        ),
+        model=dict(
+            config=dict(
+                network=dict(
+                    resolution=512,
+                    patch_size=2,
+                    temporal_compression=4,
+                    spatial_compression=8,
+                ),
+                loss=dict(
+                    config=dict(
+                        perceptual=dict(
+                            config=dict(
+                                enabled=False,
+                                lpips_boundaries=[1500],
+                                lpips_values=[0.0, 0.1],
+                                gram_enabled=False,
+                                gram_boundaries=[0],
+                            )
+                        ),
+                        video_consistency=dict(
+                            config=dict(
+                                enabled=False,
+                                boundaries=[0],
+                                values=[1.0],
+                                num_frames=29,
+                                step=4,
+                            )
+                        ),
+                        flow=dict(
+                            config=dict(
+                                enabled=False,
+                                boundaries=[0],
+                                values=[0.0],
+                                scale=4,
+                                dtype="bfloat16",
+                                checkpoint_activations=True,
+                            )
+                        ),
+                    )
+                ),
+                disc_optimizer=dict(
+                    lr=0.00016,
+                ),
+                ema=dict(
+                    enabled=False,
+                ),
+                precision="bfloat16",
+            )
+        ),
+        optimizer=dict(
+            lr=0.00004,
+        ),
+    )
+)
+
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Flow: LazyDict = deepcopy(Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Flow["job"]["name"] = "Cosmos-LidarTokenizer-CV4x8x8-Waymo-T29-Flow"
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Flow["model"]["config"]["loss"]["config"]["flow"]["config"].update(
+    {
+        "enabled": True,
+        "boundaries": [6000],
+        "values": [0.0, 0.002],
+    }
+)
+
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming: LazyDict = deepcopy(Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming["job"]["name"] = "Cosmos-LidarTokenizer-CV4x8x8-Waymo-T29-Streaming"
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming["checkpoint"]["jit"]["enabled"] = False
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming["checkpoint"]["jit"]["input_shape"] = [1, 3, 29, 512, 768]
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming["dataloader_train"] = dict(
+    dataset=dict(
+        lidar_crop_size=[-1, 768],
+    ),
+)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming["dataloader_val"] = dict(
+    dataset=dict(
+        lidar_crop_size=[-1, 768],
+    ),
+)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming["model"]["config"]["network"].update(
+    {
+        "streaming_enabled": True,
+        "streaming_raw_chunk_size": 4,
+        "streaming_latent_chunk_size": 1,
+        "streaming_detach_cache": True,
+        "streaming_disable_temporal_attn_cache": True,
+        "streaming_train_use_full_path": True,
+        "streaming_require_full_chunks": True,
+    }
+)
+
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming: LazyDict = deepcopy(Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["defaults"] = [
+    {"override /network": "continuous_factorized_video"},
+    {"override /loss": "video"},
+    {"override /data_train": "lidar_range_map_video_rRow4_waymo_t15"},
+    {"override /data_val": "lidar_range_map_video_rRow4_waymo_t15"},
+    {"override /optimizer": "fused_adam"},
+    {"override /callbacks": ["basic", "wandbLidar"]},
+    "_self_",
+]
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["job"]["name"] = "Cosmos-LidarTokenizer-CV4x8x8-Waymo-T15-Streaming"
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["checkpoint"]["jit"]["enabled"] = False
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["checkpoint"]["jit"]["input_shape"] = [1, 3, 15, 512, 896]
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["dataloader_train"] = dict(
+    dataset=dict(
+        lidar_crop_size=[-1, 896],
+    ),
+)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["dataloader_val"] = dict(
+    dataset=dict(
+        lidar_crop_size=[-1, 896],
+    ),
+)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["model"]["config"]["loss"]["config"]["video_consistency"][
+    "config"
+]["num_frames"] = 15
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming["model"]["config"]["network"].update(
+    {
+        "streaming_enabled": True,
+        "streaming_raw_chunk_size": 4,
+        "streaming_latent_chunk_size": 1,
+        "streaming_detach_cache": True,
+        "streaming_disable_temporal_attn_cache": False,
+        "streaming_train_use_full_path": False,
+    }
+)
+
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming: LazyDict = deepcopy(Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["defaults"] = [
+    {"override /network": "continuous_factorized_video"},
+    {"override /loss": "video"},
+    {"override /data_train": "lidar_range_map_video_rRow4_waymo_t17"},
+    {"override /data_val": "lidar_range_map_video_rRow4_waymo_t17"},
+    {"override /optimizer": "fused_adam"},
+    {"override /callbacks": ["basic", "wandbLidar"]},
+    "_self_",
+]
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["job"]["name"] = "Cosmos-LidarTokenizer-CV4x8x8-Waymo-T17-Streaming"
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["checkpoint"]["jit"]["enabled"] = False
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["checkpoint"]["jit"]["input_shape"] = [1, 3, 17, 512, 896]
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["checkpoint"]["load_path"] = (
+    "checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/"
+    "checkpoints/iter_000020000.pt"
+)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["checkpoint"]["strict_resume"] = False
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["dataloader_train"] = dict(
+    dataset=dict(
+        lidar_crop_size=[-1, 896],
+    ),
+)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["dataloader_val"] = dict(
+    dataset=dict(
+        lidar_crop_size=[-1, 896],
+    ),
+)
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["model"]["config"]["loss"]["config"]["video_consistency"][
+    "config"
+]["num_frames"] = 17
+Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["model"]["config"]["network"].update(
+    {
+        "streaming_enabled": True,
+        "streaming_raw_chunk_size": 4,
+        "streaming_latent_chunk_size": 1,
+        "streaming_detach_cache": True,
+        "streaming_disable_temporal_attn_cache": False,
+        "streaming_train_use_full_path": False,
+        "streaming_require_full_chunks": True,
+    }
+)
+
 cs = ConfigStore.instance()
 
-experiment_name = "cosmos_lidar_tokenizer_waymo"
-log.info(f"Registering experiment: {experiment_name}")
-cs.store(
-    group="experiment",
-    package="_global_",
-    name=experiment_name,
-    node=Cosmos_LidarTokenizer_CI8x8_Waymo,
-)
+for experiment_name, experiment_cfg in [
+    ("cosmos_lidar_tokenizer_waymo", Cosmos_LidarTokenizer_CI8x8_Waymo),
+    ("cosmos_lidar_tokenizer_cv4x8x8_waymo", Cosmos_LidarTokenizer_CV4x8x8_Waymo),
+    ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t29", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29),
+    ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_flow", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Flow),
+    ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_streaming", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming),
+    ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming),
+    ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming),
+]:
+    log.info(f"Registering experiment: {experiment_name}")
+    cs.store(
+        group="experiment",
+        package="_global_",
+        name=experiment_name,
+        node=experiment_cfg,
+    )

@@ -57,6 +57,16 @@ def register_training_data(cs):
             name="lidar_range_map_rRow4",
             node=get_lidar_range_map_dataloader(dataset_name="lidar_range_map_rRow4_train", num_workers=4, prefetch_factor=4),
         )
+    cs.store(
+            group="data_train",
+            package="dataloader_train",
+            name="lidar_range_map_video_rRow4",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_train",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
 
     # register waymo lidar data
     cs.store(
@@ -64,6 +74,46 @@ def register_training_data(cs):
             package="dataloader_train",
             name="lidar_range_map_rRow4_waymo",
             node=get_lidar_range_map_dataloader(dataset_name="lidar_range_map_rRow4_waymo_train", num_workers=4, prefetch_factor=4),
+        )
+    cs.store(
+            group="data_train",
+            package="dataloader_train",
+            name="lidar_range_map_video_rRow4_waymo",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_train",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_train",
+            package="dataloader_train",
+            name="lidar_range_map_video_rRow4_waymo_t29",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t29_train",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_train",
+            package="dataloader_train",
+            name="lidar_range_map_video_rRow4_waymo_t15",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t15_train",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_train",
+            package="dataloader_train",
+            name="lidar_range_map_video_rRow4_waymo_t17",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t17_train",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
         )
 
 
@@ -89,6 +139,16 @@ def register_val_data(cs):
             name="lidar_range_map_rRow4",
             node=get_lidar_range_map_dataloader(dataset_name="lidar_range_map_rRow4_val", num_workers=4, prefetch_factor=4),
         )
+    cs.store(
+            group="data_val",
+            package="dataloader_val",
+            name="lidar_range_map_video_rRow4",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_val",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
 
     # register waymo lidar data
     cs.store(
@@ -96,6 +156,46 @@ def register_val_data(cs):
             package="dataloader_val",
             name="lidar_range_map_rRow4_waymo",
             node=get_lidar_range_map_dataloader(dataset_name="lidar_range_map_rRow4_waymo_val", num_workers=4, prefetch_factor=4),
+        )
+    cs.store(
+            group="data_val",
+            package="dataloader_val",
+            name="lidar_range_map_video_rRow4_waymo",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_val",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_val",
+            package="dataloader_val",
+            name="lidar_range_map_video_rRow4_waymo_t29",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t29_val",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_val",
+            package="dataloader_val",
+            name="lidar_range_map_video_rRow4_waymo_t15",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t15_val",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_val",
+            package="dataloader_val",
+            name="lidar_range_map_video_rRow4_waymo_t17",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t17_val",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
         )
 
 

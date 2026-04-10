@@ -125,13 +125,20 @@ class TokenizerCheckpointer(Checkpointer):
         if not self.config_jit.enabled:
             return dict()
         input_shape = tuple(self.config_jit.input_shape)
-        example_input = torch.randn(input_shape)
-        dtype = getattr(torch, self.config_jit.dtype)
-        example_input = example_input.to(self.config_jit.device).to(dtype)
         with ema.ema_scope(model, enabled=model.config.ema.enabled):
             _model = model.network
             if isinstance(_model, torch_OptimizedModule):
                 _model = _model._orig_mod
+
+            trace_dtype = getattr(torch, self.config_jit.dtype)
+            model_dtype = next(_model.parameters()).dtype
+            if model_dtype != trace_dtype:
+                log.warning(
+                    f"JIT trace dtype {trace_dtype} does not match model dtype {model_dtype}; "
+                    f"using {model_dtype} for tracing."
+                )
+                trace_dtype = model_dtype
+            example_input = torch.randn(input_shape, device=self.config_jit.device, dtype=trace_dtype)
 
             # Make sure jit model output consistenly during consecutive calls
             # Check here: https://github.com/pytorch/pytorch/issues/74534

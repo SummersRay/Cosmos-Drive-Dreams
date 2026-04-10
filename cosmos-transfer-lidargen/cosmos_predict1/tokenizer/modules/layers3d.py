@@ -47,6 +47,38 @@ from cosmos_predict1.tokenizer.modules.utils import (
 _LEGACY_NUM_GROUPS = 32
 
 
+def _cache_key(module: nn.Module, kind: str) -> tuple[str, int]:
+    return (kind, id(module))
+
+
+def _get_cache(cache_state, module: nn.Module, kind: str, x: torch.Tensor):
+    if cache_state is None:
+        return None
+    cached = cache_state.get(_cache_key(module, kind))
+    if cached is None:
+        return None
+    return cached.to(device=x.device, dtype=x.dtype)
+
+
+def _set_cache(cache_state, module: nn.Module, kind: str, value: torch.Tensor) -> None:
+    if cache_state is not None:
+        if cache_state.get("_detach_cache", False):
+            value = value.detach()
+        cache_state[_cache_key(module, kind)] = value
+
+
+def _forward_with_cache(module: nn.Module, x: torch.Tensor, cache_state=None) -> torch.Tensor:
+    if cache_state is None:
+        return module(x)
+    if isinstance(module, nn.Sequential):
+        for layer in module:
+            x = _forward_with_cache(layer, x, cache_state)
+        return x
+    if hasattr(module, "forward") and "cache_state" in module.forward.__code__.co_varnames:
+        return module(x, cache_state=cache_state)
+    return module(x)
+
+
 class CausalConv3d(nn.Module):
     def __init__(
         self,
@@ -72,6 +104,7 @@ class CausalConv3d(nn.Module):
         self.pad_mode = pad_mode
         time_pad = time_dilation * (time_kernel_size - 1) + (1 - time_stride)
         self.time_pad = time_pad
+        self.time_kernel_size = time_kernel_size
 
         self.spatial_pad = (padding, padding, padding, padding)
 
@@ -86,14 +119,37 @@ class CausalConv3d(nn.Module):
             **kwargs,
         )
 
+    def _ensure_min_temporal_length(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[2] >= self.time_kernel_size:
+            return x
+        extra = self.time_kernel_size - x.shape[2]
+        x_prev = x[:, :, :1, ...].repeat(1, 1, extra, 1, 1)
+        return torch.cat([x_prev, x], dim=2)
+
     def _replication_pad(self, x: torch.Tensor) -> torch.Tensor:
         x_prev = x[:, :, :1, ...].repeat(1, 1, self.time_pad, 1, 1)
         x = torch.cat([x_prev, x], dim=2)
+        x = self._ensure_min_temporal_length(x)
         padding = self.spatial_pad + (0, 0)
         return F.pad(x, padding, mode=self.pad_mode, value=0.0)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self._replication_pad(x)
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
+        raw_x = x
+        if cache_state is not None and self.time_pad > 0:
+            cached = _get_cache(cache_state, self, "conv", x)
+            if cached is not None:
+                x = torch.cat([cached, x], dim=2)
+            remaining_pad = max(self.time_pad - (0 if cached is None else cached.shape[2]), 0)
+            if remaining_pad > 0:
+                x_prev = x[:, :, :1, ...].repeat(1, 1, remaining_pad, 1, 1)
+                x = torch.cat([x_prev, x], dim=2)
+            x = self._ensure_min_temporal_length(x)
+            padding = self.spatial_pad + (0, 0)
+            x = F.pad(x, padding, mode=self.pad_mode, value=0.0)
+            cache_source = raw_x if cached is None else torch.cat([cached, raw_x], dim=2)
+            _set_cache(cache_state, self, "conv", cache_source[:, :, -self.time_pad :, ...])
+        else:
+            x = self._replication_pad(x)
         return self.conv3d(x)
 
 
@@ -102,13 +158,13 @@ class CausalUpsample3d(nn.Module):
         super().__init__()
         self.conv = CausalConv3d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         x = x.repeat_interleave(2, dim=3).repeat_interleave(2, dim=4)
         time_factor = 1.0 + 1.0 * (x.shape[2] > 1)
         if isinstance(time_factor, torch.Tensor):
             time_factor = time_factor.item()
         x = x.repeat_interleave(int(time_factor), dim=2)
-        x = self.conv(x)
+        x = self.conv(x, cache_state=cache_state)
         return x[..., int(time_factor - 1) :, :, :]
 
 
@@ -124,11 +180,11 @@ class CausalDownsample3d(nn.Module):
             padding=0,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         pad = (0, 1, 0, 1, 0, 0)
         x = F.pad(x, pad, mode="constant", value=0)
         x = replication_pad(x)
-        x = self.conv(x)
+        x = self.conv(x, cache_state=cache_state)
         return x
 
 
@@ -159,26 +215,34 @@ class CausalHybridUpsample3d(nn.Module):
         self.spatial_up = spatial_up
         self.temporal_up = temporal_up
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         if not self.spatial_up and not self.temporal_up:
             return x
 
         # hybrid upsample temporally.
         if self.temporal_up:
-            time_factor = 1.0 + 1.0 * (x.shape[2] > 1)
-            if isinstance(time_factor, torch.Tensor):
-                time_factor = time_factor.item()
-            x = x.repeat_interleave(int(time_factor), dim=2)
-            x = x[..., int(time_factor - 1) :, :, :]
-            x = self.conv1(x) + x
+            if cache_state is not None:
+                seen_key = _cache_key(self, "temporal_up")
+                if seen_key in cache_state:
+                    x = x.repeat_interleave(2, dim=2)
+                else:
+                    cache_state[seen_key] = True
+                x = self.conv1(x, cache_state=cache_state) + x
+            else:
+                time_factor = 1.0 + 1.0 * (x.shape[2] > 1)
+                if isinstance(time_factor, torch.Tensor):
+                    time_factor = time_factor.item()
+                x = x.repeat_interleave(int(time_factor), dim=2)
+                x = x[..., int(time_factor - 1) :, :, :]
+                x = self.conv1(x) + x
 
         # hybrid upsample spatially.
         if self.spatial_up:
             x = x.repeat_interleave(2, dim=3).repeat_interleave(2, dim=4)
-            x = self.conv2(x) + x
+            x = self.conv2(x, cache_state=cache_state) + x
 
         # final 1x1x1 conv.
-        x = self.conv3(x)
+        x = self.conv3(x, cache_state=cache_state)
         return x
 
 
@@ -210,7 +274,7 @@ class CausalHybridDownsample3d(nn.Module):
         self.spatial_down = spatial_down
         self.temporal_down = temporal_down
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         if not self.spatial_down and not self.temporal_down:
             return x
 
@@ -218,19 +282,28 @@ class CausalHybridDownsample3d(nn.Module):
         if self.spatial_down:
             pad = (0, 1, 0, 1, 0, 0)
             x = F.pad(x, pad, mode="constant", value=0)
-            x1 = self.conv1(x)
+            x1 = self.conv1(x, cache_state=cache_state)
             x2 = F.avg_pool3d(x, kernel_size=(1, 2, 2), stride=(1, 2, 2))
             x = x1 + x2
 
         # hybrid downsample temporally.
         if self.temporal_down:
-            x = replication_pad(x)
-            x1 = self.conv2(x)
-            x2 = F.avg_pool3d(x, kernel_size=(2, 1, 1), stride=(2, 1, 1))
+            if cache_state is None:
+                pooled_input = replication_pad(x)
+                x1 = self.conv2(pooled_input)
+                x2 = F.avg_pool3d(pooled_input, kernel_size=(2, 1, 1), stride=(2, 1, 1))
+            else:
+                conv_cache = _get_cache(cache_state, self.conv2, "conv", x)
+                if conv_cache is None and x.shape[2] == 1:
+                    x1 = self.conv2(replication_pad(x))
+                else:
+                    x1 = self.conv2(x, cache_state=cache_state)
+                pooled_input = replication_pad(x) if x.shape[2] == 1 else x
+                x2 = F.avg_pool3d(pooled_input, kernel_size=(2, 1, 1), stride=(2, 1, 1))
             x = x1 + x2
 
         # final 1x1x1 conv.
-        x = self.conv3(x)
+        x = self.conv3(x, cache_state=cache_state)
         return x
 
 
@@ -258,17 +331,17 @@ class CausalResnetBlock3d(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         h = x
         h = self.norm1(h)
         h = nonlinearity(h)
-        h = self.conv1(h)
+        h = self.conv1(h, cache_state=cache_state)
 
         h = self.norm2(h)
         h = nonlinearity(h)
         h = self.dropout(h)
-        h = self.conv2(h)
-        x = self.nin_shortcut(x)
+        h = self.conv2(h, cache_state=cache_state)
+        x = _forward_with_cache(self.nin_shortcut, x, cache_state)
 
         return x + h
 
@@ -327,17 +400,17 @@ class CausalResnetBlockFactorized3d(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         h = x
         h = self.norm1(h)
         h = nonlinearity(h)
-        h = self.conv1(h)
+        h = _forward_with_cache(self.conv1, h, cache_state)
 
         h = self.norm2(h)
         h = nonlinearity(h)
         h = self.dropout(h)
-        h = self.conv2(h)
-        x = self.nin_shortcut(x)
+        h = _forward_with_cache(self.conv2, h, cache_state)
+        x = _forward_with_cache(self.nin_shortcut, x, cache_state)
 
         return x + h
 
@@ -352,7 +425,7 @@ class CausalAttnBlock(nn.Module):
         self.v = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.proj_out = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         h_ = x
         h_ = self.norm(h_)
         q = self.q(h_)
@@ -393,34 +466,52 @@ class CausalTemporalAttnBlock(nn.Module):
         self.v = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
         self.proj_out = CausalConv3d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cache_state=None) -> torch.Tensor:
         h_ = x
         h_ = self.norm(h_)
+        use_history = cache_state is not None and not cache_state.get("_disable_temporal_attn_cache", False)
+        history = _get_cache(cache_state, self, "temporal_attn", h_) if use_history else None
+        if history is not None:
+            h_context = torch.cat([history, h_], dim=2)
+        else:
+            h_context = h_
+        if use_history:
+            max_history = cache_state.get("_temporal_attn_max_history", -1)
+            if isinstance(max_history, int) and max_history > 0 and h_context.shape[2] > max_history:
+                h_context = h_context[:, :, -max_history:, ...]
+            _set_cache(cache_state, self, "temporal_attn", h_context)
         q = self.q(h_)
-        k = self.k(h_)
-        v = self.v(h_)
+        k = self.k(h_context)
+        v = self.v(h_context)
 
         # compute attention
         q, batch_size, height = space2batch(q)
         k, _, _ = space2batch(k)
         v, _, _ = space2batch(v)
 
-        bhw, c, t = q.shape
+        bhw, c, t_query = q.shape
+        t_total = k.shape[-1]
         q = q.permute(0, 2, 1)  # (bhw, t, c)
         k = k.permute(0, 2, 1)  # (bhw, t, c)
         v = v.permute(0, 2, 1)  # (bhw, t, c)
 
-        w_ = torch.bmm(q, k.permute(0, 2, 1))  # (bhw, t, t)
+        w_ = torch.bmm(q, k.permute(0, 2, 1))  # (bhw, t_query, t_total)
         w_ = w_ * (int(c) ** (-0.5))
 
         # Apply causal mask
-        mask = torch.tril(torch.ones_like(w_))
+        if cache_state is None or history is None:
+            mask = torch.tril(torch.ones_like(w_))
+        else:
+            past_len = t_total - t_query
+            query_idx = torch.arange(t_query, device=w_.device).view(1, t_query, 1)
+            key_idx = torch.arange(t_total, device=w_.device).view(1, 1, t_total)
+            mask = (key_idx <= (past_len + query_idx)).to(w_.dtype)
         w_ = w_.masked_fill(mask == 0, float("-inf"))
         w_ = F.softmax(w_, dim=2)
 
         # attend to values
         h_ = torch.bmm(w_, v)  # (bhw, t, c)
-        h_ = h_.permute(0, 2, 1).reshape(bhw, c, t)  # (bhw, c, t)
+        h_ = h_.permute(0, 2, 1).reshape(bhw, c, t_query)  # (bhw, c, t)
 
         h_ = batch2space(h_, batch_size, height)
         h_ = self.proj_out(h_)
@@ -548,6 +639,29 @@ class EncoderBase(nn.Module):
         h = self.conv_out(h)
         return h
 
+    def forward_streaming_chunk(self, x: torch.Tensor, cache_state, is_first_chunk: bool) -> torch.Tensor:
+        x = self.patcher3d.forward_streaming(x, is_first_chunk=is_first_chunk)
+
+        hs = [_forward_with_cache(self.conv_in, x, cache_state)]
+        for i_level in range(self.num_resolutions):
+            for i_block in range(self.num_res_blocks):
+                h = self.down[i_level].block[i_block](hs[-1], cache_state=cache_state)
+                if len(self.down[i_level].attn) > 0:
+                    h = _forward_with_cache(self.down[i_level].attn[i_block], h, cache_state)
+                hs.append(h)
+            if i_level != self.num_resolutions - 1:
+                hs.append(self.down[i_level].downsample(hs[-1], cache_state=cache_state))
+
+        h = hs[-1]
+        h = self.mid.block_1(h, cache_state=cache_state)
+        h = _forward_with_cache(self.mid.attn_1, h, cache_state)
+        h = self.mid.block_2(h, cache_state=cache_state)
+
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        h = _forward_with_cache(self.conv_out, h, cache_state)
+        return h
+
 
 class DecoderBase(nn.Module):
     def __init__(
@@ -664,6 +778,26 @@ class DecoderBase(nn.Module):
         h = self.conv_out(h)
         h = self.unpatcher3d(h)
         return h
+
+    def forward_streaming_chunk(self, z: torch.Tensor, cache_state, is_first_chunk: bool) -> torch.Tensor:
+        h = _forward_with_cache(self.conv_in, z, cache_state)
+
+        h = self.mid.block_1(h, cache_state=cache_state)
+        h = _forward_with_cache(self.mid.attn_1, h, cache_state)
+        h = self.mid.block_2(h, cache_state=cache_state)
+
+        for i_level in reversed(range(self.num_resolutions)):
+            for i_block in range(self.num_res_blocks + 1):
+                h = self.up[i_level].block[i_block](h, cache_state=cache_state)
+                if len(self.up[i_level].attn) > 0:
+                    h = _forward_with_cache(self.up[i_level].attn[i_block], h, cache_state)
+            if i_level != 0:
+                h = self.up[i_level].upsample(h, cache_state=cache_state)
+
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        h = _forward_with_cache(self.conv_out, h, cache_state)
+        return self.unpatcher3d.forward_streaming(h, is_first_chunk=is_first_chunk)
 
 
 class EncoderFactorized(nn.Module):
@@ -811,6 +945,29 @@ class EncoderFactorized(nn.Module):
         h = self.conv_out(h)
         return h
 
+    def forward_streaming_chunk(self, x: torch.Tensor, cache_state, is_first_chunk: bool) -> torch.Tensor:
+        x = self.patcher3d.forward_streaming(x, is_first_chunk=is_first_chunk)
+
+        hs = [_forward_with_cache(self.conv_in, x, cache_state)]
+        for i_level in range(self.num_resolutions):
+            for i_block in range(self.num_res_blocks):
+                h = self.down[i_level].block[i_block](hs[-1], cache_state=cache_state)
+                if len(self.down[i_level].attn) > 0:
+                    h = _forward_with_cache(self.down[i_level].attn[i_block], h, cache_state)
+                hs.append(h)
+            if i_level != self.num_resolutions - 1:
+                hs.append(self.down[i_level].downsample(hs[-1], cache_state=cache_state))
+
+        h = hs[-1]
+        h = self.mid.block_1(h, cache_state=cache_state)
+        h = _forward_with_cache(self.mid.attn_1, h, cache_state)
+        h = self.mid.block_2(h, cache_state=cache_state)
+
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        h = _forward_with_cache(self.conv_out, h, cache_state)
+        return h
+
 
 class DecoderFactorized(nn.Module):
     def __init__(
@@ -947,3 +1104,23 @@ class DecoderFactorized(nn.Module):
         h = self.conv_out(h)
         h = self.unpatcher3d(h)
         return h
+
+    def forward_streaming_chunk(self, z: torch.Tensor, cache_state, is_first_chunk: bool) -> torch.Tensor:
+        h = _forward_with_cache(self.conv_in, z, cache_state)
+
+        h = self.mid.block_1(h, cache_state=cache_state)
+        h = _forward_with_cache(self.mid.attn_1, h, cache_state)
+        h = self.mid.block_2(h, cache_state=cache_state)
+
+        for i_level in reversed(range(self.num_resolutions)):
+            for i_block in range(self.num_res_blocks + 1):
+                h = self.up[i_level].block[i_block](h, cache_state=cache_state)
+                if len(self.up[i_level].attn) > 0:
+                    h = _forward_with_cache(self.up[i_level].attn[i_block], h, cache_state)
+            if i_level != 0:
+                h = self.up[i_level].upsample(h, cache_state=cache_state)
+
+        h = self.norm_out(h)
+        h = nonlinearity(h)
+        h = _forward_with_cache(self.conv_out, h, cache_state)
+        return self.unpatcher3d.forward_streaming(h, is_first_chunk=is_first_chunk)

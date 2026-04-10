@@ -70,6 +70,24 @@ COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_val"] = deepcopy(
 COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_val"]["lidar_crop_size"] = [-1, -1]
 COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_val"]["sample_n_frames"] = 3
 
+# configs for temporal/video tokenizer
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_train"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_train"].update(
+    {
+        "sample_n_frames": 8,  # T=8, so actual model input is 1+T=9 after prepending the first frame
+        "frame_sampling_method": "sequential",
+        "is_video_tokenizer": True,
+        "repeat_temporal": 1,
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_val"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_val"]["lidar_crop_size"] = [-1, -1]
+
 # Waymo dataset configs
 COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_train"] = deepcopy(
     COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_train"]
@@ -93,3 +111,86 @@ COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_val"].update({
     "lidar_crop_size": [-1, -1],
     "sample_n_frames": 3,
 })
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_rRow{repeat_row}_waymo_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"].update(
+    {
+        "sample_n_frames": 9,  # 1+T real frames: 1 standalone context frame followed by T=8 future frames
+        "frame_sampling_method": "sequential",
+        "is_video_tokenizer": True,
+        "repeat_temporal": 1,
+        "use_standalone_context_frame": True,
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_val"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_val"].update(
+    {
+        "root_path": "datasets/waymo_lidar_validation",
+        "filter_list_path": "assets/lidar/waymo_val_split.lst",
+        "custom_folders": ["datasets/waymo_lidar_validation"],
+        "metadata_folder": "datasets/waymo_lidar_validation/metadata",
+        "lidar_crop_size": [-1, -1],
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_train"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_train"].update(
+    {
+        "sample_n_frames": 29,  # 1+T real frames: 1 standalone context frame followed by T=28 future frames
+        "lidar_crop_size": [-1, 832],
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_val"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_val"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_val"].update(
+    {
+        "lidar_crop_size": [-1, 832],
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t15_train"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t15_train"].update(
+    {
+        "sample_n_frames": 15,  # 1+T real frames: 1 standalone context frame followed by T=14 future frames
+        "lidar_crop_size": [-1, 896],
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t15_val"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_val"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t15_val"].update(
+    {
+        "lidar_crop_size": [-1, 896],
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t17_train"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t17_train"].update(
+    {
+        "sample_n_frames": 17,  # strict 1+4k framing: 1 standalone context frame followed by 16 future frames
+        "lidar_crop_size": [-1, 896],
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t17_val"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_val"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t17_val"].update(
+    {
+        "lidar_crop_size": [-1, 896],
+    }
+)
