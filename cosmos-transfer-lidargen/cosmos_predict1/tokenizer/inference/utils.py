@@ -141,6 +141,8 @@ def _resolve_tokenizer_model(tokenizer_name: str):
         return TokenizerModels[tokenizer_name].value
 
     normalized_name = tokenizer_name.upper()
+    if "LATENTTEMPORALCOMPRESSOR" in normalized_name or normalized_name == "LTCV":
+        return TokenizerModels["LTCV"].value
     if "VIDEO" in normalized_name:
         key = "DV" if "DISCRETE" in normalized_name else "CV"
     else:
@@ -164,12 +166,17 @@ def _is_jit_checkpoint(filepath: str | None) -> bool:
 
 def _load_tokenizer_weights(model: nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-    allowed_missing_prefixes = (
+    allowed_missing_prefixes = [
         "encoder.patcher",
         "encoder.patcher3d",
         "decoder.unpatcher",
         "decoder.unpatcher3d",
-    )
+    ]
+    # LTCV slim checkpoints omit frozen image_tokenizer weights — they are
+    # already loaded from frozen_image_tokenizer_ckpt during __init__.
+    if hasattr(model, "frozen_state_dict_prefixes"):
+        allowed_missing_prefixes.extend(model.frozen_state_dict_prefixes())
+    allowed_missing_prefixes = tuple(allowed_missing_prefixes)
     disallowed_missing = [key for key in missing_keys if not key.startswith(allowed_missing_prefixes)]
     if disallowed_missing or unexpected_keys:
         raise RuntimeError(

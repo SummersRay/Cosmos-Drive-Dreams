@@ -75,6 +75,34 @@ VIZ_KWARGS = {
 }
 
 
+def _build_layout(camera_position, scene_range, bgcolor):
+    color_str = f"rgba({bgcolor[0]},{bgcolor[1]},{bgcolor[2]})"
+    axis_cfg = dict(
+        range=[-scene_range, scene_range],
+        autorange=False,
+        showbackground=False,
+        showticklabels=False,
+        zeroline=False,
+        visible=False,
+        showgrid=False,
+    )
+    return go.Layout(
+        scene=dict(
+            xaxis=axis_cfg,
+            yaxis=axis_cfg,
+            zaxis=axis_cfg,
+            aspectmode="cube",
+            camera=camera_position,
+        ),
+        paper_bgcolor=color_str,
+        plot_bgcolor=color_str,
+        margin=dict(l=0, r=0, b=0, t=0),
+    )
+
+
+_cached_layout = None
+
+
 def visualize_point_cloud(
     point_cloud,
     colors,
@@ -86,7 +114,10 @@ def visualize_point_cloud(
     opacity=1.0,
     bgcolor=(0, 0, 0),
 ):
-    # Create a scatter plot
+    global _cached_layout
+    if _cached_layout is None:
+        _cached_layout = _build_layout(camera_position, range, bgcolor)
+
     trace = go.Scatter3d(
         x=point_cloud[:, 0],
         y=point_cloud[:, 1],
@@ -96,59 +127,11 @@ def visualize_point_cloud(
             size=point_size,
             color=colors,
             opacity=opacity,
-            line=dict(
-                width=0,
-            ),
         ),
     )
-    color_str = f"rgba({bgcolor[0]},{bgcolor[1]},{bgcolor[2]})"
 
-    fig = go.Figure(data=[trace])
-    fig.update_layout(
-        scene=dict(
-            # xaxis=dict(range=[-80, 80], autorange=False),
-            # yaxis=dict(range=[-80, 80], autorange=False),
-            # zaxis=dict(range=[-80, 0], autorange=False),
-            xaxis=dict(
-                range=[-range, range],
-                autorange=False,
-                showbackground=False,
-                showticklabels=False,
-                zeroline=False,
-                visible=False,
-                showgrid=False,  # Ensure grid lines are turned off
-            ),
-            yaxis=dict(
-                range=[-range, range],
-                autorange=False,
-                showbackground=False,
-                showticklabels=False,
-                zeroline=False,
-                visible=False,
-                showgrid=False,  # Ensure grid lines are turned off
-            ),
-            zaxis=dict(
-                range=[-range, range],
-                autorange=False,
-                showbackground=False,
-                showticklabels=False,
-                zeroline=False,
-                visible=False,
-                showgrid=False,  # Ensure grid lines are turned off
-            ),
-            # aspectmode='data',
-            aspectmode="cube",  # Set aspect mode to 'cube'
-            camera=camera_position,  # Set camera position
-        ),
-        paper_bgcolor=color_str,  # Set background color of the plotting area to transparent
-        plot_bgcolor=color_str,  # Set plot background to transparent
-        margin=dict(l=0, r=0, b=0, t=0),  # Remove margins
-    )
-
-    # fig.write_image(output_file, width=width, height=height)
-    fig_bytes = fig.to_image(width=width, height=height)
-
-    # fig_bytes = fig.to_image(format="png", width=width, height=height)
+    fig = go.Figure(data=[trace], layout=_cached_layout)
+    fig_bytes = fig.to_image(format="png", width=width, height=height)
     buf = io.BytesIO(fig_bytes)
     img = Image.open(buf)
     return np.asarray(img)[:, :, :3]
@@ -163,6 +146,45 @@ def vis_point_cloud(point_cloud, colors, save_path):
     img = visualize_point_cloud(point_cloud, colors, **VIZ_KWARGS)
     img = Image.fromarray(img)
     img.save(save_path)
+
+
+# ── Open3D fast offline renderer (replaces Plotly for batch rendering) ──
+
+
+def _plotly_cam_to_o3d(cam_dict, scene_range=100.0):
+    eye = np.array([cam_dict["eye"]["x"], cam_dict["eye"]["y"], cam_dict["eye"]["z"]])
+    center = np.array([cam_dict["center"]["x"], cam_dict["center"]["y"], cam_dict["center"]["z"]])
+    eye = eye * scene_range
+    center = center * scene_range
+    up = np.array([0.0, 0.0, 1.0])
+    return eye, center, up
+
+
+def _render_o3d_frame(pcd, width, height, eye, center, up, bg_color):
+    vis = o3d.visualization.rendering.OffscreenRenderer(width, height)
+    vis.scene.set_background(bg_color)
+    mat = o3d.visualization.rendering.MaterialRecord()
+    mat.shader = "defaultUnlit"
+    mat.point_size = 3.0
+    vis.scene.add_geometry("pts", pcd, mat)
+    vis.setup_camera(60.0, center, eye, up)
+    img = np.asarray(vis.render_to_image())
+    return img
+
+
+def vis_point_cloud_o3d(point_cloud, colors, save_path,
+                        cam_dict=None, width=1280, height=720,
+                        scene_range=100.0, bg_color=None):
+    if cam_dict is None:
+        cam_dict = VIZ_KWARGS["camera_position"]
+    if bg_color is None:
+        bg_color = np.array([0.0, 0.0, 0.0, 1.0])
+    eye, center, up = _plotly_cam_to_o3d(cam_dict, scene_range)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(point_cloud.astype(np.float64))
+    pcd.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
+    img = _render_o3d_frame(pcd, width, height, eye, center, up, bg_color)
+    Image.fromarray(img).save(save_path)
 
 
 def transform_points_to_vehicle_frame(points: np.ndarray) -> np.ndarray:

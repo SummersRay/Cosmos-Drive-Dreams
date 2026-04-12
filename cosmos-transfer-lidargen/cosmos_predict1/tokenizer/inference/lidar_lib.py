@@ -161,6 +161,12 @@ class LidarProcessor:
         full_model = getattr(self.autoencoder, "_full_model", None)
         return self.tokenizer_type == "video" and full_model is not None and getattr(full_model, "streaming_enabled", False)
 
+    def _fixed_video_frame_count(self) -> int | None:
+        full_model = getattr(self.autoencoder, "_full_model", None)
+        if self.tokenizer_type != "video" or full_model is None:
+            return None
+        return getattr(full_model, "fixed_input_frames", None)
+
     def _requires_strict_streaming_alignment(self) -> bool:
         full_model = getattr(self.autoencoder, "_full_model", None)
         return self._uses_streaming_full_model() and getattr(full_model, "streaming_require_full_chunks", False)
@@ -170,6 +176,9 @@ class LidarProcessor:
         return getattr(full_model, "streaming_raw_chunk_size", 4)
 
     def _validate_video_frame_count(self, n_frames: int, value_name: str) -> None:
+        fixed_frames = self._fixed_video_frame_count()
+        if fixed_frames is not None and n_frames != fixed_frames:
+            raise ValueError(f"{value_name} must be exactly {fixed_frames} for this tokenizer, but got {n_frames}.")
         if not self._requires_strict_streaming_alignment():
             return
         chunk_size = self._streaming_raw_chunk_size()
@@ -231,6 +240,11 @@ class LidarProcessor:
         if n_frames == 0:
             return normalised_video
         self._validate_video_frame_count(n_frames, "input frame count")
+
+        fixed_frames = self._fixed_video_frame_count()
+        if fixed_frames is not None:
+            output_chunk = self._autoencode_video_chunk(normalised_video)
+            return output_chunk[:n_frames]
 
         if self.use_standalone_context_frame and self._uses_streaming_full_model():
             output_chunk = self._autoencode_video_chunk(normalised_video)

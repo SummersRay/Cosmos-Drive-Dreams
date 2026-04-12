@@ -34,6 +34,7 @@ from cosmos_predict1.tokenizer.training.losses.continuous import (
     ColorLoss,
     FlowLoss,
     KLLoss,
+    LatentReconstructionLoss,
     PerceptualLoss,
     TokenizerLoss,
     VideoConsistencyLoss,
@@ -81,6 +82,12 @@ class ColorConfig:
 
 
 @attrs.define(slots=False)
+class LatentReconstructionConfig:
+    boundaries: list[int] = [0]
+    values: list[float] = [1.0]
+
+
+@attrs.define(slots=False)
 class FlowConfig:
     # Flow loss and its weight schedule.
     boundaries: list[int] = [250000]
@@ -111,6 +118,7 @@ class VideoConsistencyConfig:
 class VideoLoss:
     # The combined loss function, and its reduction mode.
     color: LazyDict = L(ColorLoss)(config=ColorConfig())
+    latent_recon: LazyDict = L(LatentReconstructionLoss)(config=LatentReconstructionConfig())
     kl: LazyDict = L(KLLoss)(config=KLConfig())
     perceptual: LazyDict = L(PerceptualLoss)(config=PerceptualConfig())
     flow: LazyDict = L(FlowLoss)(config=FlowConfig())

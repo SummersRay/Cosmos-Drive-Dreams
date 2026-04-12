@@ -157,6 +157,26 @@ COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_val"].updat
     }
 )
 
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_latent_train"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_latent_train"].update(
+    {
+        "sample_n_frames": 29,
+        "lidar_crop_size": [-1, 896],
+    }
+)
+
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_latent_val"] = deepcopy(
+    COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_val"]
+)
+COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t29_latent_val"].update(
+    {
+        "sample_n_frames": 29,
+        "lidar_crop_size": [-1, 896],
+    }
+)
+
 COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_t15_train"] = deepcopy(
     COMMONDATA_CONFIG[f"lidar_range_map_video_rRow{repeat_row}_waymo_train"]
 )

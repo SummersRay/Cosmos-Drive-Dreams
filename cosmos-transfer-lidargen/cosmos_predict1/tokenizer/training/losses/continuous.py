@@ -27,9 +27,11 @@ from cosmos_predict1.tokenizer.training.losses import ReduceMode
 from cosmos_predict1.tokenizer.training.losses.lpips import LPIPS
 from cosmos_predict1.utils.lazy_config import instantiate
 
-_VALID_LOSS_NAMES = ["color", "perceptual", "flow", "kl", "video_consistency"]
+_VALID_LOSS_NAMES = ["color", "latent_recon", "perceptual", "flow", "kl", "video_consistency"]
 VIDEO_CONSISTENCY_LOSS = "video_consistency"
 RECON_CONSISTENCY_KEY = f"{RECON_KEY}_consistency"
+RECONSTRUCTED_LATENTS_KEY = "reconstructed_latents"
+TARGET_LATENTS_KEY = "target_latents"
 
 
 class TokenizerLoss(nn.Module):
@@ -111,6 +113,23 @@ class KLLoss(torch.nn.Module):
         if torch.isnan(kl_weighted).any():
             raise ValueError("[KL] NaN detected in loss")
         return dict(kl=kl_weighted)
+
+
+class LatentReconstructionLoss(torch.nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.schedule = WeightScheduler(boundaries=config.boundaries, values=config.values)
+
+    def forward(self, inputs, output_batch, iteration) -> dict[str, torch.Tensor]:
+        if RECONSTRUCTED_LATENTS_KEY not in output_batch or TARGET_LATENTS_KEY not in output_batch:
+            return dict()
+        latent_diff = torch.abs(
+            output_batch[RECONSTRUCTED_LATENTS_KEY].contiguous() - output_batch[TARGET_LATENTS_KEY].contiguous()
+        )
+        latent_recon = self.schedule(iteration) * latent_diff
+        if torch.isnan(latent_recon).any():
+            raise ValueError("[LATENT_RECON] NaN detected in loss")
+        return dict(latent_recon=latent_recon)
 
 
 class PerceptualLoss(LPIPS):

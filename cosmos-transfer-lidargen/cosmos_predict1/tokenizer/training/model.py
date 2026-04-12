@@ -72,7 +72,9 @@ class TokenizerModel(Model):
             optimizer (torch.optim.Optimizer): The net optimizer.
             scheduler (torch.optim.lr_scheduler.LRScheduler): The net optimization scheduler.
         """
-        optimizer_config.params = self.network.parameters()
+        optimizer_config.params = (
+            self.network.trainable_parameters() if hasattr(self.network, "trainable_parameters") else self.network.parameters()
+        )
         optimizer = instantiate(optimizer_config)
         scheduler_config.optimizer = optimizer
         scheduler = instantiate(scheduler_config)
@@ -99,6 +101,18 @@ class TokenizerModel(Model):
         filtered_state_dict = {
             k: v for k, v in filtered_state_dict.items() if not k.startswith("network.decoder.unpatcher")
         }
+
+        # Networks that own an explicitly frozen submodule (e.g. the LatentTemporalCompressor's
+        # frozen 2D image tokenizer) can ask to have those weights dropped from the checkpoint.
+        # They will be re-hydrated from their own init-time source on the next run.
+        if hasattr(self.network, "frozen_state_dict_prefixes"):
+            frozen_prefixes = tuple(
+                f"network.{prefix}" for prefix in self.network.frozen_state_dict_prefixes()
+            )
+            if frozen_prefixes:
+                filtered_state_dict = {
+                    k: v for k, v in filtered_state_dict.items() if not k.startswith(frozen_prefixes)
+                }
 
         return filtered_state_dict
 

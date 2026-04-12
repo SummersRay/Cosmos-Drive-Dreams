@@ -25,16 +25,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 from omegaconf import OmegaConf
 import torch
+from PIL import Image
 
 # import open3d as o3d
 from tqdm import tqdm
 
 from cosmos_predict1.tokenizer.inference.lidar_lib import LidarProcessor
 from cosmos_predict1.utils.lidar_rangemap import load_range_map
-from cosmos_predict1.utils.visualize.point_cloud import vis_point_cloud
 from cosmos_predict1.utils.visualize.video import save_images_to_video, stack_videos_vertically_with_ffmpeg
 from cosmos_predict1.utils.lidar_rangemap import save_depth_maps_to_video
 from cosmos_predict1.utils.misc import natural_key
+from cosmos_predict1.utils.visualize.point_cloud import (
+    CAMERA_VIEWS as POINT_CLOUD_CAMERA_VIEWS,
+    VIZ_KWARGS,
+    visualize_point_cloud,
+)
 
 WAYMO_TOP_LIDAR_EXTRINSIC = np.array([
     [-8.4777248e-01, -5.3035414e-01, -2.5136571e-03,  1.4299999e+00],
@@ -42,6 +47,11 @@ WAYMO_TOP_LIDAR_EXTRINSIC = np.array([
     [-2.2265569e-03, -1.1804104e-03,  9.9999684e-01,  2.1840000e+00],
     [ 0.0000000e+00,  0.0000000e+00,  0.0000000e+00,  1.0000000e+00],
 ], dtype=np.float64)
+
+CAMERA_VIEWS = {
+    "front_view": POINT_CLOUD_CAMERA_VIEWS["front_view_1"],
+    "top_down_view": POINT_CLOUD_CAMERA_VIEWS["top_down_view_1"],
+}
 
 
 def _normalize_config_value(value):
@@ -64,15 +74,18 @@ def transform_points_to_vehicle_frame(points: np.ndarray) -> np.ndarray:
 
 
 def render_each_lidar(args):
-    frame_idx, original_pts, recon_pts, save_folder = args
-    n_pts = original_pts.shape[0]
-    original_colors = np.array([[1, 0.706, 0]] * n_pts, dtype=np.float32)
-    recon_colors = np.array([[0, 0.651, 0.929]] * n_pts, dtype=np.float32)
+    frame_idx, original_pts, recon_pts, save_folder, camera_view = args
+    n_orig = original_pts.shape[0]
+    n_recon = recon_pts.shape[0]
+    original_colors = np.broadcast_to(np.array([[1.0, 0.706, 0.0]], dtype=np.float32), (n_orig, 3))
+    recon_colors = np.broadcast_to(np.array([[0.0, 0.651, 0.929]], dtype=np.float32), (n_recon, 3))
+    render_kwargs = dict(VIZ_KWARGS)
+    render_kwargs["camera_position"] = camera_view
 
     save_file = os.path.join(save_folder, f"original_{frame_idx}.png")
-    vis_point_cloud(original_pts, original_colors, save_file)
+    Image.fromarray(visualize_point_cloud(original_pts, original_colors, **render_kwargs)).save(save_file)
     save_file = os.path.join(save_folder, f"recon_{frame_idx}.png")
-    vis_point_cloud(recon_pts, recon_colors, save_file)
+    Image.fromarray(visualize_point_cloud(recon_pts, recon_colors, **render_kwargs)).save(save_file)
 
 
 def _args_parser():
@@ -105,7 +118,7 @@ def _args_parser():
         "--temporal_window",
         type=int,
         default=9,
-        help="Total model input length used only for --tokenizer_type video. For strict streaming models this must satisfy `1+4k`, so common choices are 9, 17, and 29.",
+        help="Total model input length used only for --tokenizer_type video. For strict streaming models this must satisfy `1+4k`, so common choices are 9, 17, and 29. The latent-compressor model currently requires exactly 29.",
     )
     parser.add_argument(
         "--legacy_duplicate_context",
@@ -116,7 +129,7 @@ def _args_parser():
         "--max_frames",
         type=int,
         default=20,
-        help="Number of frames to use. For strict streaming video models, this should also satisfy `1+4k`; matching --temporal_window is the safest choice.",
+        help="Number of frames to use. For strict streaming video models, this should also satisfy `1+4k`; matching --temporal_window is the safest choice. The latent-compressor model currently requires 29.",
     )
     parser.add_argument("--fps", type=int, default=10, help="FPS of the video.")
     parser.add_argument("--downsample_factor_row", type=int, default=1, help="Downsample factor.")
@@ -129,6 +142,14 @@ def _args_parser():
     parser.add_argument("--uniform_fov", action="store_true", help="Use uniform FOV elevation angles")
     parser.add_argument("--display_frame", type=str, default="vehicle", choices=["lidar", "vehicle"],
                         help="Frame used for point-cloud visualization")
+    parser.add_argument(
+        "--camera_view",
+        type=str,
+        default="front_view",
+        choices=list(CAMERA_VIEWS.keys()),
+        help="Camera view used for Plotly point-cloud rendering.",
+    )
+    parser.add_argument("--max_workers", type=int, default=8, help="Parallel workers for Plotly point-cloud rendering.")
     parser.add_argument("--fov_min", type=float, default=-17.72, help="Min elevation angle in degrees (for uniform FOV)")
     parser.add_argument("--fov_max", type=float, default=2.21, help="Max elevation angle in degrees (for uniform FOV)")
     args = parser.parse_args()
@@ -218,22 +239,20 @@ def eval_sample(args):
             recon_pcd = transform_points_to_vehicle_frame(recon_pcd.reshape(-1, 3)).reshape(recon_pcd.shape)
         save_folder = f"{dump_dir}/point_cloud/{scene_name}"
         os.makedirs(save_folder, exist_ok=True)
+        camera_view = CAMERA_VIEWS[args.camera_view]
+        render_jobs = [
+            (
+                frame_idx,
+                original_pcd[frame_idx][valid_mask[frame_idx]],
+                recon_pcd[frame_idx][valid_mask[frame_idx]],
+                save_folder,
+                camera_view,
+            )
+            for frame_idx in range(n_frame)
+        ]
 
-        max_workers = 8
-        with Pool(processes=max_workers) as pool:
-            # Prepare arguments for each frame
-            process_args = [
-                (
-                    frame_idx,
-                    original_pcd[frame_idx][valid_mask[frame_idx]],
-                    recon_pcd[frame_idx][valid_mask[frame_idx]],
-                    save_folder,
-                )
-                for frame_idx in range(n_frame)
-            ]
-
-            # Process frames in parallel with progress bar
-            list(tqdm(pool.imap(render_each_lidar, process_args), total=n_frame, desc="Processing frames"))
+        with Pool(processes=args.max_workers) as pool:
+            list(tqdm(pool.imap(render_each_lidar, render_jobs), total=n_frame, desc="Rendering point clouds"))
 
         original_video_path = f"{save_folder}/original.mp4"
         recon_video_path = f"{save_folder}/recon.mp4"

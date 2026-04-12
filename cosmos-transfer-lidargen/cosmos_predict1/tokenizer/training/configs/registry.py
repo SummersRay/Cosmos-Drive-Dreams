@@ -26,6 +26,7 @@ from cosmos_predict1.tokenizer.training.configs.base.net import (
     CausalDiscreteFactorizedVideoTokenizerConfig,
     ContinuousImageTokenizerConfig,
     DiscreteImageTokenizerConfig,
+    LatentTemporalCompressorVideoTokenizerConfig,
 )
 from cosmos_predict1.tokenizer.training.configs.base.optim import (
     AdamWConfig,
@@ -91,6 +92,16 @@ def register_training_data(cs):
             name="lidar_range_map_video_rRow4_waymo_t29",
             node=get_lidar_range_map_dataloader(
                 dataset_name="lidar_range_map_video_rRow4_waymo_t29_train",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_train",
+            package="dataloader_train",
+            name="lidar_range_map_video_rRow4_waymo_t29_latent",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t29_latent_train",
                 num_workers=4,
                 prefetch_factor=4,
             ),
@@ -180,6 +191,16 @@ def register_val_data(cs):
     cs.store(
             group="data_val",
             package="dataloader_val",
+            name="lidar_range_map_video_rRow4_waymo_t29_latent",
+            node=get_lidar_range_map_dataloader(
+                dataset_name="lidar_range_map_video_rRow4_waymo_t29_latent_val",
+                num_workers=4,
+                prefetch_factor=4,
+            ),
+        )
+    cs.store(
+            group="data_val",
+            package="dataloader_val",
             name="lidar_range_map_video_rRow4_waymo_t15",
             node=get_lidar_range_map_dataloader(
                 dataset_name="lidar_range_map_video_rRow4_waymo_t15_val",
@@ -216,6 +237,12 @@ def register_net(cs):
         package="model.config.network",
         name="discrete_factorized_video",
         node=CausalDiscreteFactorizedVideoTokenizerConfig,
+    )
+    cs.store(
+        group="network",
+        package="model.config.network",
+        name="latent_temporal_compressor_video",
+        node=LatentTemporalCompressorVideoTokenizerConfig,
     )
 
 

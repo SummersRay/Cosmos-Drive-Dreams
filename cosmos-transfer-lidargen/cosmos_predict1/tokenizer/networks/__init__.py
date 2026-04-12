@@ -24,6 +24,7 @@ from cosmos_predict1.tokenizer.networks.configs import discrete_image_16x16_360p
 from cosmos_predict1.tokenizer.networks.configs import discrete_video_4x8x8_360p as discrete_video_4x8x8_360p_dict
 from cosmos_predict1.tokenizer.networks.configs import discrete_video_8x16x16_720p as discrete_video_8x16x16_720p_dict
 from cosmos_predict1.tokenizer.networks.continuous_image import ContinuousImageTokenizer
+from cosmos_predict1.tokenizer.networks.latent_temporal_compressor_video import LatentTemporalCompressorVideoTokenizer
 from cosmos_predict1.tokenizer.networks.continuous_video import CausalContinuousVideoTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_image import DiscreteImageTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_video import CausalDiscreteVideoTokenizer
@@ -65,3 +66,4 @@ class TokenizerModels(Enum):
     DI = DiscreteImageTokenizer
     CV = CausalContinuousVideoTokenizer
     DV = CausalDiscreteVideoTokenizer
+    LTCV = LatentTemporalCompressorVideoTokenizer

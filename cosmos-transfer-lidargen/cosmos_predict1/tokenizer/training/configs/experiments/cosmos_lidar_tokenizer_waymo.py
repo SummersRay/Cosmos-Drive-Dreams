@@ -369,6 +369,111 @@ Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming["model"]["config"]["network"].
     }
 )
 
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor: LazyDict = LazyDict(
+    dict(
+        defaults=[
+            {"override /network": "latent_temporal_compressor_video"},
+            {"override /loss": "video"},
+            {"override /data_train": "lidar_range_map_video_rRow4_waymo_t29_latent"},
+            {"override /data_val": "lidar_range_map_video_rRow4_waymo_t29_latent"},
+            {"override /optimizer": "fused_adam"},
+            {"override /callbacks": ["basic", "wandbLidar"]},
+            "_self_",
+        ],
+        job=dict(
+            group="tokenizer",
+            name="Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor",
+            wandb_mode="disabled",
+        ),
+        checkpoint=dict(
+            load_path="",
+            load_training_state=False,
+            save_iter=1000,
+            strict_resume=False,
+            jit=dict(enabled=False, strict=False, dtype="bfloat16", input_shape=[1, 3, 29, 512, 896]),
+        ),
+        trainer=dict(
+            max_iter=20000,
+            validation_iter=500,
+            max_val_iter=5,
+            logging_iter=100,
+        ),
+        model=dict(
+            config=dict(
+                network=dict(
+                    name="LTCV",
+                    expected_input_frames=29,
+                    expected_compressed_frames=8,
+                    exact_context_frames=1,
+                    frozen_image_tokenizer_ckpt=(
+                        "checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/"
+                        "checkpoints/iter_000020000.pt"
+                    ),
+                    image_tokenizer=dict(
+                        resolution=512,
+                    ),
+                    temporal_compressor=dict(
+                        resolution=64,
+                    ),
+                ),
+                loss=dict(
+                    config=dict(
+                        kl=dict(
+                            config=dict(
+                                boundaries=[0],
+                                values=[1e-5],
+                            )
+                        ),
+                        latent_recon=dict(
+                            config=dict(
+                                boundaries=[0],
+                                values=[1.0],
+                            )
+                        ),
+                        perceptual=dict(
+                            config=dict(
+                                enabled=False,
+                                gram_enabled=False,
+                                gram_boundaries=[0],
+                                gram_values=[0.0],
+                            )
+                        ),
+                        flow=dict(
+                            config=dict(
+                                enabled=True,
+                                boundaries=[5000],
+                                values=[0.0, 0.002],
+                                scale=4,
+                                dtype="bfloat16",
+                                checkpoint_activations=True,
+                            )
+                        ),
+                        video_consistency=dict(
+                            config=dict(
+                                enabled=False,
+                                boundaries=[0],
+                                values=[0.0],
+                                num_frames=29,
+                                step=4,
+                            )
+                        ),
+                    )
+                ),
+                disc_optimizer=dict(
+                    lr=0.00016,
+                ),
+                ema=dict(
+                    enabled=False,
+                ),
+                precision="bfloat16",
+            )
+        ),
+        optimizer=dict(
+            lr=0.00004,
+        ),
+    )
+)
+
 cs = ConfigStore.instance()
 
 for experiment_name, experiment_cfg in [
@@ -379,6 +484,7 @@ for experiment_name, experiment_cfg in [
     ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_streaming", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T29_Streaming),
     ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T15_Streaming),
     ("cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming", Cosmos_LidarTokenizer_CV4x8x8_Waymo_T17_Streaming),
+    ("cosmos_lidar_tokenizer_waymo_t29_latent_compressor", Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor),
 ]:
     log.info(f"Registering experiment: {experiment_name}")
     cs.store(

@@ -1,69 +1,239 @@
 # Cosmos Drive Dreams - Waymo LiDAR Tokenizer 工作流
 
-## 1. 数据转换：Waymo rds_hq → LiDAR Tokenizer 格式
+## 1. 总览
 
-将 Waymo rds_hq 的 `lidar_raw` 转换为 tokenizer 训练所需的 sparse range map 格式。
-这里的 `xyz` 原始保存在 vehicle frame，`lidar_to_world` 实际上是 `vehicle_to_world`；
-转换脚本会先把点云变换到 Waymo TOP LiDAR sensor frame，再写出真正的 `lidar_to_world` metadata。
+当前推荐路线是一个两阶段方案：
+- Stage 1：`CI8x8-Waymo`
+  先把 2D image tokenizer 适配到 Waymo TOP range map，建立稳定的单帧空间重建能力。
+- Stage 2：`T29 LatentCompressor`
+  冻结 `CI8x8-Waymo` 的 2D tokenizer，仅训练 latent-side temporal compressor，在 latent 空间做 `1 + 28 -> 1 + 7 -> 1 + 28`。
 
-**输出格式**：
-- `metadata/{clip_id}.npz` — pose_list, timestamps_list, frame_indices
-- `lidar/{clip_id}.tar` — sparse range maps (row/col/range per frame)
+### 1.1 当前主线
 
-**Range map 参数**：128 rows × 3600 cols，使用 Waymo TOP LiDAR 的真实 64 条非均匀 beam inclination 插值到 128 行
+| 阶段 | 实验名 | 作用 | 初始化来源 | 当前状态 |
+|------|--------|------|------------|----------|
+| Stage 1 | `cosmos_lidar_tokenizer_waymo` | Waymo 2D 域适配 | 通用 `CI8x8-Lidar` | 已完成 |
+| Stage 2 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor` | 冻结 2D tokenizer + latent-side temporal compressor | `CI8x8-Waymo iter_000020000.pt` | 当前主线，长训中 |
+
+### 1.2 关键结论
+
+- stage-1 已完成，最终权重是 [iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt)
+- 当前主线固定语义是 `29 -> 8 -> 29`，其中第 `1` 帧旁路保留，不参与时间压缩
+- 当前主线已通过 `1GPU / 8GPU` 训练 smoke 和固定 `29` 帧推理 smoke
+- 当前主线正式长训已于 `2026-04-11` 启动，并在 `2026-04-12` 从 `iter_000017000.pt` 续训到总 `40000` iter
+- 历史对比主线 `T17 Streaming` 仍保留，最新稳定 checkpoint 是 [iter_000017000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo-T17-Streaming/checkpoints/iter_000017000.pt)
+
+### 1.3 实验状态速览
+
+| 实验 | 类型 | 状态 | 初始化来源 | 备注 |
+|------|------|------|------------|------|
+| `cosmos_lidar_tokenizer_waymo` | `CI8x8-Waymo` | 已完成 | 通用 `CI8x8-Lidar` | stage-1 主线 |
+| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor` | `T29 LatentCompressor` | 长训中 | `CI8x8-Waymo iter_000020000.pt` | 当前主线；详见 §7.5 |
+| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming` | `T17 Streaming` | 历史暂停 | `CI8x8-Waymo iter_000020000.pt` | 旧 stage-2 主线 |
+| `cosmos_lidar_tokenizer_cv4x8x8_waymo` | `CV4x8x8-Waymo` | 历史完成 | 通用 `CI8x8-Lidar` | 旧版 `9` 帧 causal 语义 |
+| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming` | `T15 Streaming` | 历史暂停 | 通用 `CI8x8-Lidar` | legacy ragged-tail 实验 |
+| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29` | `T29` | 历史暂停 | 通用 `CI8x8-Lidar` | 固定 `29` 帧窗口 baseline |
+| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_flow` | `T29 + flow` | 历史暂停 | 通用 `CI8x8-Lidar` | 时序 loss 探索分支 |
+| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_streaming` | `T29 Streaming` | 历史暂停 | 通用 `CI8x8-Lidar` | 早期 streaming 探索分支 |
+
+### 1.4 命名速查
+
+| 名称片段 | 含义 |
+|----------|------|
+| `CI8x8` | image tokenizer，主要做空间压缩，通常对应单帧训练与推理 |
+| `CV4x8x8` | video tokenizer，时间压缩 `4x`，空间压缩 `8x` |
+| `Waymo` | 数据域切到 Waymo TOP LiDAR range map |
+| `T17` | 总输入帧数为 `17 = 1 + 16` |
+| `T29` | 总输入帧数为 `29 = 1 + 28` |
+| `Streaming` | 启用了严格 `1 + 4k` 的 streaming video 路径 |
+| `LatentCompressor` | 冻结 2D tokenizer，在 latent 空间做时序压缩与重建 |
+| `Flow` | 在 baseline 基础上额外引入 `flow loss` 的实验分支 |
+
+例子：
+- `Waymo-T17-Streaming` 可以读成：
+  `Waymo` 数据域 + `CV4x8x8` 视频 tokenizer + `17` 帧总输入 + streaming 训练/推理路径。
+
+## 2. 运行环境与外部启动
+
+统一环境：
+- 工作目录：`/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen`
+- conda 环境：`cosmos-predict1`
+- checkpoint 根目录：`checkpoints/`，实际软链接到 `/data2/checkpoints/`
+
+每次启动训练前建议统一执行：
+
+```bash
+cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
+source /root/miniforge3/etc/profile.d/conda.sh
+conda activate cosmos-predict1
+export OUTPUT_ROOT=checkpoints
+```
+
+### 2.1 外部 tmux 启动
+
+长训建议都在外部 `tmux` 里启动，并把 stdout 同步写到实验目录下的 `stdout.log`。
+
+`CI8x8-Waymo`：
+
+```bash
+tmux new-session -d -s waymo_tok_ci8x8 '/bin/zsh -lc "
+source /root/miniforge3/etc/profile.d/conda.sh
+conda activate cosmos-predict1
+cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
+export OUTPUT_ROOT=checkpoints
+torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
+  --config=cosmos_predict1/tokenizer/training/configs/config.py -- \
+  experiment=cosmos_lidar_tokenizer_waymo \
+  2>&1 | tee checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/stdout.log
+"'
+```
+
+`T29 LatentCompressor`：
+
+```bash
+tmux new-session -d -s waymo_tok_t29_latent '/bin/zsh -lc "
+source /root/miniforge3/etc/profile.d/conda.sh
+conda activate cosmos-predict1
+cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
+export OUTPUT_ROOT=checkpoints
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HTTP_PROXY=http://127.0.0.1:7890
+export HTTPS_PROXY=http://127.0.0.1:7890
+export http_proxy=http://127.0.0.1:7890
+export https_proxy=http://127.0.0.1:7890
+export NO_PROXY=localhost,127.0.0.1,::1
+torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
+  --config=cosmos_predict1/tokenizer/training/configs/config.py -- \
+  experiment=cosmos_lidar_tokenizer_waymo_t29_latent_compressor \
+  trainer.max_iter=40000 \
+  2>&1 | tee -a checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log
+"'
+```
+
+**注意**：flow loss 在 iter 5000 首次启用时会 lazy-download RAFT-large 权重（torchvision hub，21 MB）。机器没外网会直接 `ConnectionRefusedError` 炸掉训练。上面 tmux 启动注入了本地 socks/http 代理作为兜底；更稳妥的做法是提前把权重放进 torch hub cache：
+
+```bash
+mkdir -p /root/.cache/torch/hub/checkpoints
+curl -L -o /root/.cache/torch/hub/checkpoints/raft_large_C_T_SKHT_V2-ff5fadd5.pth \
+  https://download.pytorch.org/models/raft_large_C_T_SKHT_V2-ff5fadd5.pth
+```
+
+一旦权重落盘，后续所有 run / resume 都走 cache，不依赖网络。续训用 `tee -a` 追加而不是覆盖 `stdout.log`。
+
+常用 tmux 操作：
+- 查看会话：`tmux ls`
+- 进入会话：`tmux attach -t waymo_tok_ci8x8`
+- 退出不停止：`Ctrl-b d`
+- 结束会话：`tmux kill-session -t <session_name>`
+
+### 2.2 续训
+
+这套训练默认按实验目录自动续训：
+- 同一 `job.name`
+- 同一输出目录
+- 目录里存在 `checkpoints/latest_checkpoint.txt`
+
+继续训练时，只要重新用同一个实验名启动，训练器会自动从最近一次保存的 checkpoint 恢复。
+
+常看两个文件：
+- `checkpoints/.../checkpoints/latest_checkpoint.txt`
+- `checkpoints/.../stdout.log`
+
+### 2.3 日志与 Loss 记录
+
+当前默认 `wandb_mode="disabled"`，所以主记录来源是本地日志。
+
+建议直接看：
+
+```bash
+tail -f checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log
+```
+
+当前主线另外开了一个 sidecar tmux 会话，专门把 validation loss 导成 CSV：
+
+```bash
+tmux new-session -d -s waymo_tok_t29_latent_loss '/bin/zsh -lc "
+source /root/miniforge3/etc/profile.d/conda.sh
+conda activate cosmos-predict1
+cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
+while true; do
+  python scripts/export_validation_loss_csv.py \
+    --log_path checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log \
+    --output_csv checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/validation_loss_history.csv
+  sleep 300
+done
+"'
+```
+
+日志里重点关注：
+- `Validation loss (iteration N): ...`
+- `Loading checkpoint ...`
+- `Done with loading the checkpoint ...`
+- `Done with training.`
+
+说明：
+- 训练进度条基于 `tqdm`，tmux pane 有时会看起来像“没输出”，但 `stdout.log` 通常还在持续写。
+- 当前实验主要以 `Validation loss` 作为阶段性对比信号。
+- `validation_loss_history.csv` 是从 `stdout.log` 提取的去重版本，便于后续画曲线或比对 resume 前后的走势。
+- checkpoint 默认每 `1000` iter 保存一次，validation 默认每 `500` iter 执行一次。
+
+## 3. 数据转换
+
+将 Waymo `rds_hq` 的 `lidar_raw` 转为 tokenizer 训练所需的 sparse range map。
+
+输出格式：
+- `metadata/{clip_id}.npz`
+- `lidar/{clip_id}.tar`
+
+Range map 规格：
+- `128 x 3600`
+- 使用 Waymo TOP LiDAR 的真实 64 条非均匀 beam inclination，插值到 128 行
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams
 conda activate cosmos-predict1
 
-# 转换训练集 (798 clips)
+# 训练集
 python cosmos-drive-dreams-toolkits/convert_waymo_lidar_to_tokenizer_format.py \
     --input_root /data2/rds_hq_waymo/training \
     --output_root /data2/rds_hq_waymo/lidar_tokenizer/training \
     --num_workers 16
 
-# 转换验证集 (202 clips)
+# 验证集
 python cosmos-drive-dreams-toolkits/convert_waymo_lidar_to_tokenizer_format.py \
     --input_root /data2/rds_hq_waymo/validation \
     --output_root /data2/rds_hq_waymo/lidar_tokenizer/validation \
     --num_workers 16
 ```
 
-**可选参数**：
-- `--split_file`：指定 clip 列表文件
-- `--n_cols`：range map 宽度（默认 3600）
-- `--n_rows`：当前固定要求为 128，和 tokenizer 训练配置保持一致
-- `--num_workers`：按 clip 并行转换的进程数（默认 8，建议从 8 或 16 起试）
+注意：
+- 原始 `xyz` 在 vehicle frame；转换后 range map 位于 Waymo TOP LiDAR frame。
+- metadata 中保存的 `pose_list` 是和输出 LiDAR frame 对齐后的 `lidar_to_world`。
+- 当前数据规模：
+  - train `798` clips
+  - val `202` clips
 
-**注意事项**：
-- 每个 clip 的最后一帧会被保留；其 `pose_list[-1]` 使用当前帧 pose 自复制，时间戳补 `+100000us`
-- 如果原始 `timestamp/` 目录存在，会优先使用真实时间戳；否则按顺序生成 `idx * 100000`
-- metadata 中保存的 `pose_list` 是真实的 `lidar_to_world`，与输出 range map 所在 LiDAR frame 对齐
-
-## 2. 创建软链接和 split 文件
+## 4. 软链接与 Split
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
 conda activate cosmos-predict1
 
-# 软链接数据到 datasets/ 目录
 ln -s /data2/rds_hq_waymo/lidar_tokenizer/training datasets/waymo_lidar_training
 ln -s /data2/rds_hq_waymo/lidar_tokenizer/validation datasets/waymo_lidar_validation
 
-# 生成 split 文件
 ls datasets/waymo_lidar_training/lidar/ | sed 's/.tar//' > assets/lidar/waymo_train_split.lst
 ls datasets/waymo_lidar_validation/lidar/ | sed 's/.tar//' > assets/lidar/waymo_val_split.lst
 ```
 
-## 3. 后训练 LiDAR Tokenizer (8x A100-80G)
+## 5. 训练
 
-当前支持两条后训练路线：
-- `CI8x8`：保持现有逐帧 image tokenizer，不做时间压缩
-- `CV4x8x8`：切换到 causal video tokenizer，对时间维做 `4x` 压缩
+### 5.1 Stage 1: `CI8x8-Waymo`
 
-### 3.1 逐帧版本：CI8x8
-
-基于预训练的 Cosmos-Tokenizer-CI8x8-Lidar 在 Waymo 数据上 fine-tune。
+用途：
+- 先做 Waymo 域适配
+- 学好单帧 spatial reconstruction
+- 为后续 3D streaming 提供更稳的初始化
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
@@ -76,15 +246,26 @@ torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
     experiment=cosmos_lidar_tokenizer_waymo
 ```
 
-**训练配置**（`cosmos_lidar_tokenizer_waymo.py`）：
-- 预训练权重：`checkpoints/Cosmos-Tokenizer-CI8x8-Lidar/Cosmos-0.1-Tokenizer-CI8x8/autoencoder.pt`
-- max_iter=20000, validation_iter=500, save_iter=1000, lr=4e-5, precision=float32
-- 输出目录：`checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/`
-- 支持断点续训：自动从 `latest_checkpoint.txt` 恢复
+当前配置要点：
+- 初始化权重：
+  `checkpoints/Cosmos-Tokenizer-CI8x8-Lidar/Cosmos-0.1-Tokenizer-CI8x8/autoencoder.pt`
+- `max_iter=20000`
+- `validation_iter=500`
+- `max_val_iter=5`
+- `precision=float32`
+- train / val 都对齐到 `512 x 896`
+- `strict_resume=False`
 
-### 3.2 时间压缩版本：CV4x8x8
+最终产物目录：
+- [/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo)
 
-如果希望 tokenizer 在 latent 里同时压缩时间维，可以训练 `CV4x8x8` 版本：
+### 5.2 Stage 2: `T29 LatentCompressor`
+
+用途：
+- 冻结 `CI8x8-Waymo` 的 2D tokenizer
+- 只训练 latent-side temporal compressor
+- 当前固定语义是 `29 -> 8 -> 29`
+- 其中第 `1` 帧旁路保留，压缩的只有后 `28` 帧
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
@@ -95,113 +276,84 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
     --config=cosmos_predict1/tokenizer/training/configs/config.py \
     -- \
-    experiment=cosmos_lidar_tokenizer_cv4x8x8_waymo
+    experiment=cosmos_lidar_tokenizer_waymo_t29_latent_compressor \
+    trainer.max_iter=40000
 ```
 
-**训练配置**（同文件内新增 `cosmos_lidar_tokenizer_cv4x8x8_waymo`）：
-- 网络：`continuous_factorized_video`
-- 压缩率：`temporal_compression=4`, `spatial_compression=8`, `patch_size=2`
-- 时间维语义：输入定义为 `1 + T`，latent 时间长度为 `1 + T/4`
-- 当前配置示例：`T=8`，顺序采样真实的 `1+T=9` 帧，其中第 1 帧是 standalone context，后 8 帧是后续真实帧；latent 长度为 `3`
-- 训练输入 shape：`[B, 3, 9, 512, 896]`
-- 训练精度：`precision=bfloat16`，并使用 `basic` callbacks 中的 `low_precision`
-- validation：`validation_iter=500`, `max_val_iter=5`
-- JIT 导出精度：`checkpoint.jit.dtype=bfloat16`
-- 输出目录：`checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo/`
+当前配置要点：
+- 初始化权重：
+  [iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt)
+- 输入总帧数：`29 = 1 + 28`
+- 时间压缩：`4x`
+- latent 时间长度：`8 = 1 + 7`
+- 空间尺寸：`512 x 896`
+- `precision=bfloat16`
+- 冻结模块：`encoder / quant_conv / post_quant_conv / decoder`
+- 优化器只更新 temporal compressor 参数
+- `strict_resume=False`
 
-**初始化说明**：
-- 默认仍从 `CI8x8` LiDAR checkpoint 读取可兼容参数
-- 由于 2D image tokenizer 和 3D video tokenizer 的部分层 shape 不同，`strict_resume=False`
-- 不匹配的 tensor 会被自动跳过；新增的时序层会随机初始化再 fine-tune
-- 当前 Waymo `CV4x8x8` 已对齐 `cosmos-transfer2.5` 的 causal 语义：前导 `1` 是真实首帧，不再通过重复首帧伪造
-- 这只会影响后续新训练/新推理；此前已经训练完成的旧 checkpoint 仍属于 legacy“复制首帧”语义，如需完全对齐需要按新配置重新训练
+当前 loss 设计：
+- `color + latent_recon + delayed flow + small kl`
+- `latent_recon` 从 `iter 0` 生效，权重 `1.0`
+- `flow` 在 `iter 5000` 后以 `0.002` 小权重开启（首次启用时会 lazy 下载 RAFT，见 §2.1 注意事项）
+- `kl=1e-5`（对 posterior 做温和约束，避免 latent 长期漂移，方便后续接 diffusion prior）
+- `perceptual.enabled=False`
+- `video_consistency.enabled=False`
+- `ema.enabled=False`
 
-**当前基线策略（先跑通）**：
-- 当前 `CV4x8x8` 先以可稳定收敛的 baseline 为主，`video_consistency.enabled=False`，`flow.enabled=False`
-- `flow` 对应的是基于 `RAFT` 的光流一致性损失；当前训练只跑 `20000` iter，而它的权重调度是 `boundaries=[1_000_000], values=[0.0, 0.01]`
-- 因此在这版配置里，即使把 `flow` 打开，前 `20000` iter 内它的权重也仍然是 `0.0`，不会真正参与优化
-- 先关闭这两项的好处是避免额外的 `RAFT` 初始化、checkpoint 下载和显存占用，优先把 `1+T -> 1+T/4` 的重建基线训稳
-- `LPIPS` 当前改为短 warmup：前 `1000` iter 权重为 `0.0`，之后切到 `0.1`，让随机初始化的时序层先用重建项稳定下来，再引入 perceptual loss
-- 如果后续需要强化时间一致性，建议先完成这版 baseline，再从其 checkpoint 出发做第二阶段微调，并以较小权重逐步打开 `video_consistency` 或 `flow`
-- 当前 8 卡实测中，`CV4x8x8` 的 OOM 主要出现在 `LPIPS/PerceptualLoss` 的 float32 路径；切到 `bfloat16` 后可稳定跑过首个 iter 并成功保存 checkpoint
-- 如果遇到显存碎片问题，建议保留 `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+这是一版分离式 baseline，目标是先保住 2D 重建能力，再单独学习时序压缩。
 
-**T29 训练补充**：
-- 如果目标改成 `1+28 -> 1+7 -> 1+28`，仓库里已准备好 `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29` 和 `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_flow`
-- 当前可稳定跑通 8x80G 的 `T29` baseline 使用宽度 `832`，JIT 输入是 `[1, 3, 29, 512, 832]`
-- `T29` baseline 当前显式关闭了 `LPIPS`，因为即使去掉 `RAFT`，`29 x 896` 的 decoder 峰值也仍会在 80G 卡上 OOM；把宽度收为 `832` 后，8 卡 smoke 和完整训练起步已验证可过
-- `video_consistency` 目前仍保持关闭；原因不是权重大小，而是它当前实现会先把 full-window 输入切成更短的重叠子窗口再送进网络，这和我们想训练的固定 `29` 帧压缩目标不一致
-- `flow` 代码仍保留为第二阶段选项，但不再作为默认长训入口；当前 `FlowLoss` 已改成按需初始化，不会在权重为 `0` 的阶段提前加载 `RAFT`
-- 当前 `T29` 长训配置把 `max_val_iter` 设为 `1`，优先保证首轮 validation 和训练启动稳定
+当前产物目录：
+- [/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor)
 
-**T17 Streaming 主线（当前默认配置）**：
-- 当前主线配置已切到 `cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming`
-- 输入定义为真实 `1+16=17` 帧，空间宽度保持 `896`，时间压缩仍为 `4x`，因此语义上是 `17 -> 5 -> 17`
-- 第二阶段训练现已默认从 [iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt) 初始化，也就是先做 `CI8x8-Waymo` 域适配，再进入 `T17 Streaming`
-- 第二阶段继续保持 `strict_resume=False`，这样可以在加载 `CI8x8-Waymo` 的同时兼容新增的 3D/streaming 层 warm start
-- 当前 streaming 配置为：`streaming_enabled=True`、`streaming_raw_chunk_size=4`、`streaming_latent_chunk_size=1`、`streaming_train_use_full_path=False`、`streaming_require_full_chunks=True`
-- 当前主线额外约束为：`streaming_disable_temporal_attn_cache=False`，让训练和推理都使用同一套 temporal attention cache 语义，避免“训练禁用、推理启用”导致后半段帧质量明显漂移
-- 这意味着训练阶段已经直接走 streaming path，而不是只在验证/推理时才启用 streaming
-- 当前主线严格遵循 Wan 风格分块约束：输入总帧数只能是 `1 + 4k`，因此 `9 / 17 / 29` 这类长度有效，而 `15` 这种 `1+4+4+4+2` 的尾块输入不再作为主线配置
-- 旧的 `T15` / `T29` / `T29 Streaming` 方案代码仍完整保留；其中 `T15 Streaming` 仅作为 legacy ragged-tail 实验保留，不再作为默认主线
-- 本地 GPU smoke 已验证当前代码链路：
-  - `1` 卡训练 `cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming` 跑通 `1 iter`，并成功保存 [iter_000000001.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo-T17-Streaming-Debug1GPU/checkpoints/iter_000000001.pt)
-  - 使用这份 debug checkpoint 做 `29` 帧推理可以正常完成，输出写到了 [range_map_video](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t17_streaming_debug1gpu_29f/range_map_video/10203656353524179475_7625_000_7645_000.mp4) 和 [histogram](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t17_streaming_debug1gpu_29f/histogram/10203656353524179475_7625_000_7645_000.png)
-  - 同时也验证了严格约束生效：`15` 帧输入会直接报错 `input frame count must satisfy 1 + n*4`
+当前 smoke 结果：
+- `1GPU` 训练 smoke 已通过：
+  [/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-Debug1GPU](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-Debug1GPU)
+- `8GPU` 训练 smoke 已通过：
+  [/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-Smoke8GPU](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-Smoke8GPU)
+- 固定 `29` 帧推理 smoke 已通过：
+  [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_debug1gpu/range_map_video/10203656353524179475_7625_000_7645_000.mp4)
+  / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_debug1gpu/histogram/10203656353524179475_7625_000_7645_000.png)
 
-**当前已知问题（已记录，暂不阻塞当前主线）**：
-- 当前 streaming 实现已经对齐了 Wan2.1 的核心思路：`1 + 4 + 4 + ...` 原始帧分块、`1 + 1 + 1 + ...` latent 分块、跨 chunk causal cache 和 temporal attention cache
-- 早期 `T15 Streaming` 试验里曾把 `streaming_disable_temporal_attn_cache=True` 打开；由于旧实现只在 `training` 阶段应用这个开关，出现了“训练禁用 temporal attention cache、推理启用 temporal attention cache”的行为不一致。当前代码已修正为 train/infer 都遵循同一个开关，并且当前主线默认改为 `False`
-- 当前主线显式开启了 `streaming_require_full_chunks=True`：输入总长度必须满足 `1 + 4k`，避免 `15` 这类 ragged tail 输入和 Wan2.1 的严格分块语义不一致
-- 但它还不是“完全等价的 Wan2.1 VAE”：`quant_conv` 和 `post_quant_conv` 目前仍在整段 hidden / latent 上执行，而不是逐 chunk 流式执行
-- 因此当前 streaming 路径已经能支持变长输入，但显存占用仍会随总时长增长，不是严格意义上的 constant-memory streaming
-- 这一点对当前 `17` 帧训练和 `29` 帧推理不是阻塞项，所以先不改；如果以后目标扩展到更长序列，再继续往“fully streaming quant/post-quant”推进
-- `BASE` 版 3D encoder/decoder 的 streaming path 目前没有和 full path 做等价性对齐；当前 Waymo 主线使用的是 `FACTORIZED` 结构，因此不受这个限制
-- 目前“超过训练窗口长度的 streaming 推理”优先保证的是 full `.pt` checkpoint + `config.yaml` 路径；如果只给 encoder/decoder 分离权重，接口行为仍按固定窗口更稳妥
-- `29` 帧推理“已通过”的含义是结构和加载链路已打通，不代表 smoke checkpoint 的重建质量已经可用于最终指标对比；质量仍应以完整训练后的 checkpoint 为准
-- `CI8x8-Waymo` 的 stage-1 warm start 当前继续保持 `strict_resume=False`，优先兼容已有通用 `CI8x8` 初始化路径；更严格的 2D->2D checkpoint 校验如果后面需要，再单独切回来
-- `CI8x8-Waymo` 的 validation 现已改为更稳定的配置：`max_val_iter=5`，并且使用 `512x896` 裁剪与 `sequential_from_zero` 取帧，便于把 stage-1 的 val loss 当作更可靠的趋势信号
-- `CI8x8-Waymo` 中原本继承来的 Gram loss 调度在 `20000 iter` 内不会真正生效；现已显式关闭，避免出现“配置里写了 Gram、实际上整轮训练都没用到”的误解
-- `TokenizerLoss` 里之前会无条件把 `loss_mask` 覆盖成全 1；这个 bug 现已修复，后续如果数据真的提供 `loss_mask`，loss 会按 mask 生效
-- `TokenizerModel` 里原先基于 `video.size(2) == 3` 的视频维度判断也已收紧：现在优先把 `dim=1` 视为 channel 维，只有 `dim=1 != 3 且 dim=2 == 3` 时才会做 `BTCHW -> BCTHW` 的 permute，避免恰好 3 帧视频被误判
+当前正式长训的 loss 走势和已回填推理结果统一收在 §7.5。日常追踪主要看这两个文件：
+- [stdout.log](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log)
+- [validation_loss_history.csv](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/validation_loss_history.csv)
 
-**权重存储**：权重实际保存在 `/data2/checkpoints/posttraining/`，通过软链接映射到 `checkpoints/posttraining`。
+瘦身后 checkpoint 单文件 `49 MB`（对比 CI8x8-Waymo `iter_000020000.pt` 的 `916 MB`，见 §11）。
 
-**训练结果**（Validation Loss，前 5000 iter）：
+### 5.3 历史实验
 
-注：下面这组历史数值来自早期 `max_val_iter=1` 配置，只适合看整体趋势，不适合过度解读相邻 checkpoint 的细小波动。当前仓库配置已将 `max_val_iter` 提高到 `5`，后续验证信号会更稳。
+仓库中仍保留以下历史或分支实验配置，便于回看：
+- `cosmos_lidar_tokenizer_cv4x8x8_waymo`
+- `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29`
+- `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_flow`
+- `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_streaming`
+- `cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming`
 
-| Iteration | Val Loss |
-|-----------|----------|
-| 0         | 0.0532   |
-| 500       | 0.0248   |
-| 1000      | 0.0197   |
-| 2000      | 0.0179   |
-| 3000      | 0.0163   |
-| 3500      | 0.0124   |
-| 5000      | 0.0135   |
+当前默认主线不是这些分支，而是 `T29 LatentCompressor`。
 
-## 4. 推理评估
+## 6. 推理
 
-### 4.1 逐帧版本：CI8x8
+### 6.1 `CI8x8-Waymo`
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
 conda activate cosmos-predict1
 
-# 注意：必须使用 --tokenizer_dtype float32（JIT 模型用 float32 traced）
 python -m cosmos_predict1.tokenizer.inference.lidar_cli \
     --sample_path="/data2/rds_hq_waymo/lidar_tokenizer/validation/lidar/<clip_id>.tar" \
-    --enc_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000005000_enc.jit" \
-    --dec_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000005000_dec.jit" \
-    --output_folder="waymo_eval" \
+    --enc_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000_enc.jit" \
+    --dec_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000_dec.jit" \
+    --output_folder="waymo_eval_ci8x8_waymo_iter20000" \
     --tokenizer_dtype float32 \
     --max_frames 20 \
     --waymo_top \
     --display_frame vehicle
 ```
 
-### 4.2 时间压缩版本：CV4x8x8
+### 6.2 `T29 LatentCompressor`
+
+该方案只支持完整 `.pt + config.yaml` 推理，不走 `enc/dec` 分离路径，也不支持变长输入。
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
@@ -209,30 +361,11 @@ conda activate cosmos-predict1
 
 python -m cosmos_predict1.tokenizer.inference.lidar_cli \
     --sample_path="/data2/rds_hq_waymo/lidar_tokenizer/validation/lidar/<clip_id>.tar" \
-    --enc_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo/checkpoints/iter_000005000_enc.jit" \
-    --dec_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo/checkpoints/iter_000005000_dec.jit" \
-    --output_folder="waymo_eval_cv4x8x8" \
+    --model_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/checkpoints/<iter>.pt" \
+    --tokenizer_config_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/config.yaml" \
+    --output_folder="waymo_eval_t29_latent_<iter>" \
     --tokenizer_type video \
-    --temporal_window 9 \
-    --tokenizer_dtype bfloat16 \
-    --max_frames 20 \
-    --waymo_top \
-    --display_frame vehicle
-```
-
-对于当前 `T17 Streaming` / full `.pt` checkpoint，也可以直接走整模加载：
-
-```bash
-cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
-conda activate cosmos-predict1
-
-python -m cosmos_predict1.tokenizer.inference.lidar_cli \
-    --sample_path="/data2/rds_hq_waymo/lidar_tokenizer/validation/lidar/<clip_id>.tar" \
-    --model_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo-T17-Streaming/checkpoints/iter_0000xxxxx.pt" \
-    --tokenizer_config_path="checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo-T17-Streaming/config.yaml" \
-    --output_folder="waymo_eval_t17_streaming" \
-    --tokenizer_type video \
-    --temporal_window 17 \
+    --temporal_window 29 \
     --tokenizer_dtype bfloat16 \
     --max_frames 29 \
     --vis_pcd 0 \
@@ -240,46 +373,157 @@ python -m cosmos_predict1.tokenizer.inference.lidar_cli \
     --display_frame vehicle
 ```
 
-**推理参数**：
-- `--tokenizer_dtype`：`CI8x8` 用 `float32`；当前 `CV4x8x8` 导出的 JIT 是 `bfloat16`，所以这里应显式设成 `bfloat16`
-- `--tokenizer_type`：`image` 或 `video`。现有 `CI8x8` 用 `image`，新的 `CV4x8x8` 用 `video`
-- `--temporal_window`：仅 `video` 模式使用，表示模型总输入长度 `1+T`，不是“原始帧块长度”；对当前严格 streaming 主线，它必须满足 `1 + 4k`
-- 当前 `CV4x8x8` 配置里 `T=8`，所以这里应设为 `9`；如果以后改成 `1+28 -> 1+7`，这里就应设为 `29`
-- 当前 `video` 推理只做单窗口 `1+T -> 1+T/4 -> 1+T` autoencode，不再做长视频分块拼接；评估时建议令 `--max_frames` 与 `--temporal_window` 保持一致
-- 对于当前 `T17 Streaming` 的 full `.pt` 模型，`--max_frames` 可以大于 `--temporal_window`；但 `--max_frames` 本身也必须满足 `1 + 4k`，例如使用 `17` 帧训练权重进行 `29` 帧推理
-- 这条“`17` 训 `29` 推”的能力是当前严格主线的目标用法；如果只使用分离的 `enc/dec` 权重，仍建议按固定窗口方式评估
-- 本地 GPU smoke 中，使用 `T17` debug checkpoint 进行 `29` 帧推理时已实际跑通，单条样本的测试指标为：`RMSE 39.00 / MAE 34.49 / Rel 2.51`
-- 这组数值只用于证明训练和推理代码链路可运行；由于 checkpoint 只训练了 `1 iter`，不代表最终模型质量
-- 如果需要复现旧版“复制首帧”的历史 checkpoint，可额外加 `--legacy_duplicate_context`
-- `--max_frames`：限制评估帧数（-1 为全部，默认 20）
-- `--vis_pcd`：是否渲染点云对比（默认 1）
-- `--waymo_top`：使用 Waymo TOP LiDAR 的真实 beam inclination 反投影
-- `--display_frame vehicle`：将点云可视化从 LiDAR frame 变换回 vehicle frame，避免看起来“斜着”
-- `--downsample_factor_col`：列方向下采样因子（默认 2，3600→1800）
-- `--max_range` / `--min_range`：range 裁剪范围（默认 100/5）
+推理参数要点：
+- `--temporal_window=29`
+- `--max_frames=29`
+- 固定语义是 `29 -> 8 -> 29`
+- 第 `1` 帧是精确保留的 2D latent，不参与时间压缩
+- 当前 v1 不支持变长和长序列 streaming
+- 点云可视化当前使用 Plotly，并恢复为并行渲染路径
 
-**评估指标**（验证集单 clip）：
-- RMSE: 0.72 m
-- MAE: 0.39 m
-- Relative Error: 2%
+## 7. 实验记录（训练 + 推理合并）
 
-**输出文件**：
-- `dump_results/lidar_tokenizer/<output_folder>/range_map_video/` — 原始 vs 重建 range map 对比视频
-- `dump_results/lidar_tokenizer/<output_folder>/histogram/` — 误差分布直方图
-- `dump_results/lidar_tokenizer/<output_folder>/point_cloud/` — 原始 vs 重建点云对比视频
+统一说明：
+- 当前已回填的历史样本统一使用 `10203656353524179475_7625_000_7645_000`
+- smoke 推理结果不放进正式实验记录
+- 每个实验都按“训练设置 / 推理记录”放在一起，方便横向比较
 
-## 5. 可视化原始数据
+### 7.1 `CI8x8-Waymo`
+
+训练设置：
+
+| 项目 | 设置 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_waymo` |
+| 任务形态 | 2D image tokenizer，单帧空间重建 |
+| 初始化来源 | 通用 `CI8x8-Lidar` `autoencoder.pt` |
+| 训练输入 | clip 内采样 `10` 帧，train / val 统一 `512 x 896` |
+| 压缩语义 | spatial `8x` |
+| 精度 | `float32` |
+| 训练轮次 | `max_iter=20000`，`validation_iter=500`，`max_val_iter=5`，`save_iter=1000` |
+| 关键设置 | `strict_resume=False` |
+| 当前状态 | 已完成，作为 stage-1 最终权重 |
+| 权重目录 | [Cosmos-LidarTokenizer-CI8x8-Waymo](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo) |
+
+推理记录：
+
+| Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
+|------------|----------|------|-----|-----|------|------|
+| `iter_000011000` | `20` 帧，image tokenizer | 未回填 | 未回填 | 未回填 | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter11000_clip1/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter11000_clip1/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter11000_clip1/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 只保留了产物目录，终端指标未单独记录 |
+| `iter_000013000` | `20` 帧，image tokenizer | 未回填 | 未回填 | 未回填 | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter13000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter13000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter13000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 只保留了产物目录，终端指标未单独记录 |
+| `iter_000020000` | `20` 帧，image tokenizer | `0.20 m` | `0.09 m` | `0.00` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_ci8x8_waymo_iter20000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_ci8x8_waymo_iter20000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_ci8x8_waymo_iter20000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | Stage-1 最终结果 |
+
+### 7.2 旧版 `CV4x8x8-Waymo`
+
+训练设置：
+
+| 项目 | 设置 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_cv4x8x8_waymo` |
+| 任务形态 | 端到端 3D video tokenizer，旧版 causal 语义 |
+| 初始化来源 | 通用 `CI8x8-Lidar` |
+| 训练输入 | 旧版总输入 `9` 帧 |
+| 压缩语义 | `9 -> 3 -> 9` |
+| 精度 | `bfloat16` |
+| 训练轮次 | `max_iter=20000` |
+| 当前状态 | 历史完成 |
+
+推理记录：
+
+| Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
+|------------|----------|------|-----|-----|------|------|
+| `iter_000020000` | 旧版 video eval，默认 `20` 帧 | `10.16 m` | `4.20 m` | `0.14` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_cv4x8x8_iter20000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_cv4x8x8_iter20000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_cv4x8x8_iter20000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 旧版 `9` 帧 causal 语义 |
+
+### 7.3 `T15 Streaming`
+
+训练设置：
+
+| 项目 | 设置 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming` |
+| 任务形态 | streaming video tokenizer，legacy ragged-tail |
+| 初始化来源 | 通用 `CI8x8-Lidar` |
+| 训练输入 | 总输入 `15 = 1 + 14` |
+| 压缩语义 | `15 -> 4 -> 15` |
+| 精度 | `bfloat16` |
+| 关键设置 | 非严格 `1 + 4k`，尾部存在 ragged tail |
+| 当前状态 | 历史暂停 |
+
+推理记录：
+
+| Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
+|------------|----------|------|-----|-----|------|------|
+| `iter_000012000` | `29` 帧推理（`15` 训 `29` 推） | `13.52 m` | `7.25 m` | `0.27` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t15_streaming_latest_29f/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t15_streaming_latest_29f/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t15_streaming_latest_29f/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 后半段质量偏弱 |
+
+### 7.4 `T17 Streaming`
+
+训练设置：
+
+| 项目 | 设置 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming` |
+| 任务形态 | 严格 `1 + 4k` streaming video tokenizer |
+| 初始化来源 | `CI8x8-Waymo iter_000020000.pt` |
+| 训练输入 | 总输入 `17 = 1 + 16`，`512 x 896` |
+| 压缩语义 | `17 -> 5 -> 17` |
+| 精度 | `bfloat16` |
+| 关键设置 | `streaming_raw_chunk_size=4`，`streaming_latent_chunk_size=1`，`streaming_detach_cache=True` |
+| loss 取向 | 保守 baseline，主要验证 streaming 结构 |
+| 当前状态 | 历史暂停，最新稳定 checkpoint 为 `iter_000017000.pt` |
+
+推理记录：
+
+| Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
+|------------|----------|------|-----|-----|------|------|
+| `iter_000007000` | `29` 帧推理（`17` 训 `29` 推） | `11.54 m` | `6.23 m` | `0.23` | 无固定产物目录 | 历史终端记录 |
+| `iter_000017000` | `29` 帧推理（`17` 训 `29` 推） | `8.17 m` | `4.03 m` | `0.15` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t17_streaming_iter17000_29f/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t17_streaming_iter17000_29f/histogram/10203656353524179475_7625_000_7645_000.png) | 当前最新稳定对比结果；点云视频未成功生成 |
+
+### 7.5 `T29 LatentCompressor`
+
+训练设置：
+
+| 项目 | 设置 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor` |
+| 任务形态 | 冻结 2D tokenizer + latent-side temporal compressor |
+| 初始化来源 | [CI8x8-Waymo iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt) |
+| 训练输入 | 固定总输入 `29 = 1 + 28`，空间 `512 x 896` |
+| 压缩语义 | `29 -> 8 -> 29`，第 `1` 帧旁路保留、不参与压缩 |
+| 结构设置 | 冻结 `encoder / quant_conv / post_quant_conv / decoder`，只训练 temporal compressor |
+| 精度 | `bfloat16` |
+| 训练轮次 | 当前续训总目标 `max_iter=40000`，`validation_iter=500`，`max_val_iter=5`，`save_iter=1000` |
+| loss 设置 | `color=1.0`，`latent_recon=1.0`，`flow` 在 `iter 5000` 后开启且权重 `0.002`，`kl=1e-5`，`perceptual/video_consistency/ema=off` |
+| 关键设置 | `strict_resume=False`，checkpoint 瘦身后单文件约 `49 MB` |
+| 日志记录 | [stdout.log](./cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log) / [validation_loss_history.csv](./cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/validation_loss_history.csv) |
+| 当前状态 | 当前主线；`2026-04-12` 从 `iter_000017000.pt` 续训到总 `40000` iter |
+
+训练记录（节选）：
+
+| iter | val loss | 备注 |
+|------|----------|------|
+| 0 | `3.930` | 初始验证 |
+| 2500 | `1.156` | 前期快速下降 |
+| 4500 | `0.909` | flow 启用前最低点之一 |
+| 5000 | —— | validation 阶段因 RAFT 下载中断 |
+| 5500 | `0.893` | resume 后 flow 首次生效 |
+| 17000 | `0.581689` | 当前已验证的最新正式 checkpoint |
+
+推理记录：
+
+| Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
+|------------|----------|------|-----|-----|------|------|
+| `iter_000017000` | 固定 `29 -> 8 -> 29` | `7.60 m` | `3.20 m` | `0.11` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_iter17000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_iter17000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_iter17000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 当前正式长训阶段的 `17000` 轮结果；点云恢复到最开始的 Plotly 并行渲染观感 |
+
+## 8. 原始数据可视化
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams
 conda activate cosmos-predict1
 
-# Range map 视频（Spectral colormap）
 python cosmos-drive-dreams-toolkits/visualize_waymo_rangemap.py \
     --tar_path="<lidar_tar_path>" \
     --output_dir="/data2/waymo_visualizations/raw"
 
-# Range map + 点云渲染
 python cosmos-drive-dreams-toolkits/visualize_waymo_rangemap.py \
     --tar_path="<lidar_tar_path>" \
     --output_dir="/data2/waymo_visualizations/raw" \
@@ -289,50 +533,61 @@ python cosmos-drive-dreams-toolkits/visualize_waymo_rangemap.py \
     --max_frames 20
 ```
 
-**目录约定**：
-- 原始 tokenizer 数据的可视化统一放在 `/data2/waymo_visualizations/raw/`
-- 推理评估产物继续保留在 `dump_results/lidar_tokenizer/<output_folder>/`，不额外归档到 `/data2`
+常用参数：
+- `--camera_view front_view` 或 `top_down_view`
+- `--display_frame vehicle`
+- `--max_frames 20`
 
-**可视化可选参数**：
-- `--camera_view`：`front_view` 或 `top_down_view`
-- `--display_frame`：`vehicle` 或 `lidar`。Waymo tokenizer 数据建议用 `vehicle`
-- `--elevation_mode`：默认 `waymo_top`，与当前转换脚本输出匹配
-- `--max_frames`：限制帧数（-1 为全部）
-- `--save_frames`：同时保存单帧图片
-- `--colormap`：colormap 名称（默认 Spectral）
-- `--max_workers`：点云渲染并行数（默认 8）
+## 9. 当前已知限制
 
-## 6. 关键文件
+- 当前 `T29 LatentCompressor` 长训已启动但尚未封顶；正式指标（RMSE/MAE/Rel）待 iter 5000+ checkpoint 推理后回填。
+- 该方案只支持固定 `29` 帧，不支持变长和 streaming 长序列。
+- 当前 `T17 Streaming` 虽然支持 `29` 帧推理，但质量仍明显弱于 `CI8x8-Waymo` 的单帧重建。
+- 当前新主线使用 `color + latent_recon + delayed flow + small kl`，仍属于 v1 baseline。
+- 点云视频渲染在当前环境里不够稳定，`range_map_video + histogram` 更适合作为常规评估输出。
+- 当前 `T17` 训练多次在 validation 后被 `SIGKILL`；最新稳定 checkpoint 是 `iter_000017000.pt`。
+- **Flow loss 在 iter 5000 首次启用时依赖网络下载 RAFT 权重**：`torchvision.models.optical_flow.raft_large(pretrained=True)` 会 lazy 拉取 `raft_large_C_T_SKHT_V2-ff5fadd5.pth`。离线环境必须提前把权重放进 `~/.cache/torch/hub/checkpoints/`，否则 iter 5000 的首个 validation 会直接崩溃。具体操作见 §2.1。本次长训就是在 iter 5000 踩到了这个坑，通过预下载 + 代理 env 双兜底恢复。
+
+## 10. 关键文件
 
 | 文件 | 说明 |
 |------|------|
 | `cosmos-drive-dreams-toolkits/convert_waymo_lidar_to_tokenizer_format.py` | Waymo → tokenizer 格式转换 |
 | `cosmos-drive-dreams-toolkits/visualize_waymo_rangemap.py` | Range map / 点云可视化 |
-| `cosmos-transfer-lidargen/cosmos_predict1/tokenizer/training/configs/experiments/cosmos_lidar_tokenizer_waymo.py` | Waymo 后训练实验配置 |
-| `cosmos-transfer-lidargen/cosmos_predict1/tokenizer/training/configs/registry.py` | Hydra dataloader 注册 |
-| `cosmos-transfer-lidargen/cosmos_predict1/tokenizer/training/datasets/lidar_datasets/configs.py` | Waymo 数据集配置（保守使用 `lidar_length=169`） |
-| `cosmos-transfer-lidargen/assets/lidar/waymo_train_split.lst` | 训练集 clip 列表（798 clips） |
-| `cosmos-transfer-lidargen/assets/lidar/waymo_val_split.lst` | 验证集 clip 列表（202 clips） |
+| `cosmos-transfer-lidargen/cosmos_predict1/tokenizer/training/configs/experiments/cosmos_lidar_tokenizer_waymo.py` | Waymo 训练实验配置 |
+| `cosmos-transfer-lidargen/cosmos_predict1/tokenizer/training/datasets/lidar_datasets/configs.py` | Waymo 数据配置 |
+| `cosmos-transfer-lidargen/cosmos_predict1/tokenizer/networks/latent_temporal_compressor_video.py` | 新的冻结 2D + latent temporal compressor 主体 |
+| `cosmos-transfer-lidargen/cosmos_predict1/tokenizer/networks/continuous_video.py` | Streaming video tokenizer |
+| `cosmos-transfer-lidargen/assets/lidar/waymo_train_split.lst` | train split |
+| `cosmos-transfer-lidargen/assets/lidar/waymo_val_split.lst` | val split |
 
-## 7. 当前实现补充
+## 11. 本轮代码审阅改动（2026-04-11）
 
-- 磁盘上保存的 sparse range map 是单通道：`lidar_row` / `lidar_col` / `lidar_range`
-- 还原后的原始 shape 为 `128 x 3600`
-- tokenizer dataloader 会先做列下采样 `3600 -> 1800`，再把单通道直接复制成 3 通道，并做行 repeat `128 -> 512`
-- `CI8x8` 训练时按帧随机采样，单帧输入 shape 约为 `3 x 512 x 896`
-- `CV4x8x8` 训练时遵循 causal 形式：输入时间长度是 `1+T`，编码后 latent 时间长度是 `1+T/4`
-- 当前 `CV4x8x8` 示例里取 `T=8`，所以模型输入 shape 为 `3 x 9 x 512 x 896`，对应的是 `1` 个真实 context 帧加 `8` 个真实后续帧；latent 时间长度为 `3`
-- 点云可视化默认建议使用 `vehicle frame`；如果切回 `lidar frame`，Waymo TOP 数据视觉上可能会出现旋转/倾斜
+一次集中评审后对 T29 LatentCompressor 主线做的 4 处小改动，都已随长训启动生效：
 
-## 8. 数据路径
+1. **`train()` 每次都重新 freeze 2D backbone**
+   [latent_temporal_compressor_video.py](cosmos-transfer-lidargen/cosmos_predict1/tokenizer/networks/latent_temporal_compressor_video.py) 的 `train()` override 改为每次切换 train/eval 模式都调一次 `_freeze_image_tokenizer()`，杜绝构造后 requires_grad 被意外打开。
+
+2. **`decode()` 接收可选 `exact_context_latent`**
+   `_decode_temporal_latents` / `decode` 新增 `exact_context_latent=None` 参数；`forward()` 里显式传入 `target_latents[:, :, :1]`，保证即便调用方只拿到 `temporal_compressor.encode` 的输出也能正确还原首帧旁路。缺省行为完全向后兼容。
+
+3. **Checkpoint 瘦身：不再存冻结的 2D 权重**
+   `LatentTemporalCompressorVideoTokenizer.frozen_state_dict_prefixes()` 返回 `("image_tokenizer.",)`，[training/model.py](cosmos-transfer-lidargen/cosmos_predict1/tokenizer/training/model.py) 的 `TokenizerModel.state_dict` 检测到这个 hook 后把对应前缀从保存的 state_dict 里剔除。实测：T29 LatentCompressor 的 ckpt 从预计 ~950 MB 压到 **49 MB**，20k iter 全程预估少写 ~17 GB。Resume 路径同步生效：瘦身后的 ckpt 不含 2D 权重，`image_tokenizer` 在 `__init__` 里从 `frozen_image_tokenizer_ckpt` 重新加载，`TokenizerModel.load_state_dict` 的 `own_state - filtered_state_dict` 集合里也不会再出现 `image_tokenizer.*`，不会报 missing key。已在本次 resume（iter 5000）验证过。
+
+4. **`kl` 权重从 `0.0` 改为 `1e-5`**
+   给 posterior 一个温和约束，避免 latent 分布长期漂移；为后续接 diffusion prior 省一版重训。对当前 val loss 曲线影响观测不到（量级远低于 color + latent_recon）。
+
+LTCV 单测 `pytest cosmos-transfer-lidargen/cosmos_predict1/tokenizer/networks/latent_temporal_compressor_video_test.py -q` 改动后仍然 3/3 绿。
+
+## 12. 数据路径
 
 | 数据 | 路径 |
 |------|------|
-| Waymo 原始数据（训练集） | `/data2/rds_hq_waymo/training/` |
-| Waymo 原始数据（验证集） | `/data2/rds_hq_waymo/validation/` |
-| 转换后 tokenizer 数据（训练集） | `/data2/rds_hq_waymo/lidar_tokenizer/training/` |
-| 转换后 tokenizer 数据（验证集） | `/data2/rds_hq_waymo/lidar_tokenizer/validation/` |
-| 预训练权重 | `/data2/checkpoints/Cosmos-Tokenizer-CI8x8-Lidar/` → 软链接 `checkpoints/Cosmos-Tokenizer-CI8x8-Lidar` |
-| 后训练权重 | `/data2/checkpoints/posttraining/` → 软链接 `checkpoints/posttraining` |
-| 推理结果 | `dump_results/lidar_tokenizer/waymo_eval/` |
-| 原始数据可视化目录 | `/data2/waymo_visualizations/raw/` |
+| Waymo 原始训练集 | `/data2/rds_hq_waymo/training/` |
+| Waymo 原始验证集 | `/data2/rds_hq_waymo/validation/` |
+| tokenizer 训练集 | `/data2/rds_hq_waymo/lidar_tokenizer/training/` |
+| tokenizer 验证集 | `/data2/rds_hq_waymo/lidar_tokenizer/validation/` |
+| 预训练权重 | `/data2/checkpoints/Cosmos-Tokenizer-CI8x8-Lidar/` |
+| 后训练权重 | `/data2/checkpoints/posttraining/` |
+| 推理结果 | `/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/` |
+| 原始数据可视化 | `/data2/waymo_visualizations/raw/` |

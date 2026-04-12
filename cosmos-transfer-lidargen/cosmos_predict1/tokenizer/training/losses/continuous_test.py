@@ -23,7 +23,11 @@ from types import SimpleNamespace
 import torch
 
 from cosmos_predict1.tokenizer.training.datasets.utils import INPUT_KEY, MASK_KEY
-from cosmos_predict1.tokenizer.training.losses.continuous import TokenizerLoss
+from cosmos_predict1.tokenizer.training.losses.continuous import (
+    RECONSTRUCTED_LATENTS_KEY,
+    TARGET_LATENTS_KEY,
+    TokenizerLoss,
+)
 
 
 class ConstantLoss(torch.nn.Module):
@@ -90,4 +94,33 @@ def test_tokenizer_loss_preserves_input_loss_mask():
 
     expected = mask.sum()
     assert torch.isclose(loss_dict["loss"]["mask_sum"], expected)
+    assert torch.isclose(total_loss, expected)
+
+
+def test_tokenizer_loss_includes_latent_reconstruction_term():
+    config = SimpleNamespace(
+        reduce="mean",
+        latent_recon={
+            "_target_": "cosmos_predict1.tokenizer.training.losses.continuous.LatentReconstructionLoss",
+            "config": {
+                "boundaries": [0],
+                "values": [1.0],
+            },
+        },
+    )
+    loss_module = TokenizerLoss(config)
+    reconstructed_latents = torch.tensor([[[[[1.0, 2.0]]]]])
+    target_latents = torch.tensor([[[[[0.0, 1.0]]]]])
+
+    loss_dict, total_loss = loss_module(
+        inputs={INPUT_KEY: torch.zeros(1, 3, 1, 2, 2)},
+        output_batch={
+            RECONSTRUCTED_LATENTS_KEY: reconstructed_latents,
+            TARGET_LATENTS_KEY: target_latents,
+        },
+        iteration=0,
+    )
+
+    expected = torch.abs(reconstructed_latents - target_latents).mean()
+    assert torch.isclose(loss_dict["loss"]["latent_recon"], expected)
     assert torch.isclose(total_loss, expected)

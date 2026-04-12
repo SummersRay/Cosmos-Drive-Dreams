@@ -33,6 +33,7 @@ from cosmos_predict1.tokenizer.networks.continuous_image import ContinuousImageT
 from cosmos_predict1.tokenizer.networks.continuous_video import CausalContinuousVideoTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_image import DiscreteImageTokenizer
 from cosmos_predict1.tokenizer.networks.discrete_video import CausalDiscreteVideoTokenizer
+from cosmos_predict1.tokenizer.networks.latent_temporal_compressor_video import LatentTemporalCompressorVideoTokenizer
 from cosmos_predict1.utils.lazy_config import LazyCall as L
 from cosmos_predict1.utils.lazy_config import LazyDict
 
@@ -183,4 +184,55 @@ CausalDiscreteFactorizedVideoTokenizerConfig: LazyDict = L(CausalDiscreteVideoTo
     encoder=Encoder3DType.FACTORIZED.name,
     decoder=Decoder3DType.FACTORIZED.name,
     name="CausalDiscreteFactorizedVideoTokenizer",
+)
+
+LatentTemporalCompressorVideoTokenizerConfig: LazyDict = L(LatentTemporalCompressorVideoTokenizer)(
+    name="LTCV",
+    expected_input_frames=29,
+    expected_compressed_frames=8,
+    exact_context_frames=1,
+    frozen_image_tokenizer_ckpt="",
+    image_tokenizer=dict(
+        attn_resolutions=[32],
+        channels=128,
+        channels_mult=[2, 4, 4],
+        dropout=0.0,
+        in_channels=3,
+        spatial_compression=8,
+        num_res_blocks=2,
+        out_channels=3,
+        resolution=512,
+        patch_size=4,
+        patch_method="haar",
+        latent_channels=16,
+        z_channels=16,
+        z_factor=1,
+        name="ContinuousImageTokenizer",
+        formulation=ContinuousFormulation.AE.name,
+        encoder=EncoderType.Default.name,
+        decoder=DecoderType.Default.name,
+    ),
+    temporal_compressor=dict(
+        attn_resolutions=[],
+        channels=64,
+        channels_mult=[1, 1, 2],
+        dropout=0.0,
+        in_channels=16,
+        num_res_blocks=2,
+        out_channels=16,
+        resolution=64,
+        patch_size=1,
+        patch_method="haar",
+        latent_channels=16,
+        z_channels=16,
+        z_factor=1,
+        num_groups=1,
+        legacy_mode=False,
+        spatial_compression=1,
+        temporal_compression=4,
+        formulation=ContinuousFormulation.AE.name,
+        encoder=Encoder3DType.FACTORIZED.name,
+        decoder=Decoder3DType.FACTORIZED.name,
+        name="LatentTemporalCompressorAE",
+    ),
 )
