@@ -102,8 +102,12 @@ class WandBLidarCallback(callback.Callback):
     def __init__(self, config: Config, trainer: Trainer):
         super().__init__(config, trainer)
 
-    def _should_generate_media(self) -> bool:
-        return distributed.is_rank0() and self.config.job.wandb_mode != "disabled"
+    def _should_generate_validation_media(self) -> bool:
+        return (
+            distributed.is_rank0()
+            and self.config.job.wandb_mode != "disabled"
+            and getattr(self.config.job, "wandb_log_validation_media", True)
+        )
 
     def on_train_start(self, model: Model, iteration: int = 0) -> None:
         wandb_utils.init_wandb(self.config, model=model)
@@ -175,7 +179,7 @@ class WandBLidarCallback(callback.Callback):
 
         input_images = data_batch[_input_key].float()  # shape: [N, 3, H, w]
         output_images = output_batch[PREDICTION].float()
-        generate_media = self._should_generate_media()
+        generate_media = self._should_generate_validation_media()
         wandb_media = None
 
         if generate_media:

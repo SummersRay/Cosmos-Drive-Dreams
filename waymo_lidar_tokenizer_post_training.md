@@ -14,6 +14,8 @@
 |------|--------|------|------------|----------|
 | Stage 1 | `cosmos_lidar_tokenizer_waymo` | Waymo 2D 域适配 | 通用 `CI8x8-Lidar` | 已完成 |
 | Stage 2 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor` | 冻结 2D tokenizer + latent-side temporal compressor | `CI8x8-Waymo iter_000020000.pt` | 当前主线，长训中 |
+| Stage 2-FT | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft` | 后期降 LR 微调变体 | `T29 LatentCompressor iter_000027000.pt` | 长训中，当前从 `iter_000009000.pt` 续到总 `20000` iter |
+| Stage 2-FT-V2 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v2` | 更小 LR + 更低 flow + validation media 关闭 | `LRDecayFT iter_000010000.pt` | 当前最新稳定 checkpoint 为 `iter_000005000.pt`；`5500` 轮 validation 后被 `SIGKILL` |
 
 ### 1.2 关键结论
 
@@ -21,6 +23,9 @@
 - 当前主线固定语义是 `29 -> 8 -> 29`，其中第 `1` 帧旁路保留，不参与时间压缩
 - 当前主线已通过 `1GPU / 8GPU` 训练 smoke 和固定 `29` 帧推理 smoke
 - 当前主线正式长训已于 `2026-04-11` 启动，并在 `2026-04-12` 从 `iter_000017000.pt` 续训到总 `40000` iter
+- 针对 `22500+` 后验证 loss 震荡平台，新增了 `LRDecayFT` 变体：从 `iter_000027000.pt` 只加载模型权重续训，改用较小 LR + cosine decay + 更稳的 val 统计
+- `LRDecayFT` 到 `iter_000009000.pt` 的单条验证样本推理结果为 `RMSE 6.79 / MAE 2.51 / Rel 0.08`，优于当前已记录的 base `T29` `iter_000017000`
+- `LRDecayFT-V2` 到 `iter_000005000.pt` 的单条验证样本推理结果为 `RMSE 6.77 / MAE 2.48 / Rel 0.08`，并已补齐 range / histogram / point-cloud 三类产物
 - 历史对比主线 `T17 Streaming` 仍保留，最新稳定 checkpoint 是 [iter_000017000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo-T17-Streaming/checkpoints/iter_000017000.pt)
 
 ### 1.3 实验状态速览
@@ -29,6 +34,8 @@
 |------|------|------|------------|------|
 | `cosmos_lidar_tokenizer_waymo` | `CI8x8-Waymo` | 已完成 | 通用 `CI8x8-Lidar` | stage-1 主线 |
 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor` | `T29 LatentCompressor` | 长训中 | `CI8x8-Waymo iter_000020000.pt` | 当前主线；详见 §7.5 |
+| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft` | `T29 LatentCompressor LRDecayFT` | 长训中 | `T29 LatentCompressor iter_000027000.pt` | 后期降 LR 微调分支；当前从 `iter_000009000.pt` 续到总 `20000` iter；详见 §7.6 |
+| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v2` | `T29 LatentCompressor LRDecayFT-V2` | 历史暂停 | `LRDecayFT iter_000010000.pt` | validation media 关闭 + `wandb offline` 诊断分支；最新稳定 checkpoint 为 `iter_000005000.pt`；详见 §7.7 |
 | `cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming` | `T17 Streaming` | 历史暂停 | `CI8x8-Waymo iter_000020000.pt` | 旧 stage-2 主线 |
 | `cosmos_lidar_tokenizer_cv4x8x8_waymo` | `CV4x8x8-Waymo` | 历史完成 | 通用 `CI8x8-Lidar` | 旧版 `9` 帧 causal 语义 |
 | `cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming` | `T15 Streaming` | 历史暂停 | 通用 `CI8x8-Lidar` | legacy ragged-tail 实验 |
@@ -141,7 +148,28 @@ curl -L -o /root/.cache/torch/hub/checkpoints/raft_large_C_T_SKHT_V2-ff5fadd5.pt
 
 ### 2.3 日志与 Loss 记录
 
-当前默认 `wandb_mode="disabled"`，所以主记录来源是本地日志。
+当前推荐做法是同时保留：
+- 本地 `stdout.log + validation_loss_history.csv`
+- 在线 `wandb`
+
+当前 `LRDecayFT` 已切到在线 `wandb`：
+- entity：`leishuangming1103-zhejiang-university`
+- project：`Lidar Tokenizer`
+- run name：`Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT`
+- run id：`u9e21vjg`
+
+当前代码已支持：
+- `wandb_entity`
+- `wandb_project`
+- 续训时复用已有 `wandb_id.txt`，避免同一实验被拆成多条 run
+
+如果本机没有登录态，可先执行：
+
+```bash
+source /root/miniforge3/etc/profile.d/conda.sh
+conda activate cosmos-predict1
+wandb login
+```
 
 建议直接看：
 
@@ -176,6 +204,11 @@ done
 - 当前实验主要以 `Validation loss` 作为阶段性对比信号。
 - `validation_loss_history.csv` 是从 `stdout.log` 提取的去重版本，便于后续画曲线或比对 resume 前后的走势。
 - checkpoint 默认每 `1000` iter 保存一次，validation 默认每 `500` iter 执行一次。
+- `wandb` 会单独记录：
+  - `train/loss`、`val/loss`
+  - `train/color`、`train/latent_recon`、`train/flow`、`train/kl`
+  - `val/color`、`val/latent_recon`、`val/flow`、`val/kl`
+  - `val/depth_mae`、`val/depth_rmse`、`val/depth_relative_error`
 
 ## 3. 数据转换
 
@@ -320,6 +353,39 @@ torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
 - [validation_loss_history.csv](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/validation_loss_history.csv)
 
 瘦身后 checkpoint 单文件 `49 MB`（对比 CI8x8-Waymo `iter_000020000.pt` 的 `916 MB`，见 §11）。
+
+后期平台期微调分支：
+
+```bash
+cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
+conda activate cosmos-predict1
+export OUTPUT_ROOT=checkpoints
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
+    --config=cosmos_predict1/tokenizer/training/configs/config.py \
+    -- \
+    experiment=cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft
+```
+
+`LRDecayFT` 配置要点：
+- 从 [iter_000027000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/checkpoints/iter_000027000.pt) 只加载模型权重
+- `checkpoint.load_training_state=False`
+- `optimizer.lr=1e-5`
+- `scheduler=warmup_cosine`
+- `scheduler.warmup_iters=500`
+- `scheduler.lr_decay_iters=13000`
+- `scheduler.min_lr=1e-6`
+- `trainer.max_iter=13000`
+- `trainer.max_val_iter=10`
+- `flow` 从微调起点即保持 `0.002`
+
+当前 `LRDecayFT` 目录：
+- [/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT)
+- 最新稳定 checkpoint：
+  [iter_000009000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT/checkpoints/iter_000009000.pt)
+- 当前 loss 记录：
+  [validation_loss_history.csv](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT/validation_loss_history.csv)
 
 ### 5.3 历史实验
 
@@ -506,13 +572,92 @@ python -m cosmos_predict1.tokenizer.inference.lidar_cli \
 | 4500 | `0.909` | flow 启用前最低点之一 |
 | 5000 | —— | validation 阶段因 RAFT 下载中断 |
 | 5500 | `0.893` | resume 后 flow 首次生效 |
-| 17000 | `0.581689` | 当前已验证的最新正式 checkpoint |
+| 17000 | `0.582` | 第一次 SIGKILL 前最新 checkpoint |
+| 17500 | `0.572` | 从 iter_000017000 续训后首个 validation |
+| 18500 | `0.533` | |
+| 19500 | `0.519` | 当前最佳 |
+| 20000 | `0.556` | |
+| 21000 | `0.527` | |
+| 22000 | `0.533` | 最新（训练仍在进行中，目标 40000） |
 
 推理记录：
 
 | Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
 |------------|----------|------|-----|-----|------|------|
 | `iter_000017000` | 固定 `29 -> 8 -> 29` | `7.60 m` | `3.20 m` | `0.11` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_iter17000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_iter17000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_iter17000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 当前正式长训阶段的 `17000` 轮结果；点云恢复到最开始的 Plotly 并行渲染观感 |
+
+### 7.6 `T29 LatentCompressor LRDecayFT`
+
+训练设置：
+
+| 项目 | 设置 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft` |
+| 任务形态 | `T29 LatentCompressor` 的后期降 LR 微调分支 |
+| 初始化来源 | [T29 LatentCompressor iter_000027000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/checkpoints/iter_000027000.pt) |
+| 训练输入 | 固定总输入 `29 = 1 + 28`，空间 `512 x 896` |
+| 压缩语义 | `29 -> 8 -> 29`，第 `1` 帧旁路保留、不参与压缩 |
+| 精度 | `bfloat16` |
+| 优化设置 | `optimizer.lr=1e-5`，`scheduler=warmup_cosine`，`warmup_iters=500`，`lr_decay_iters=13000`，`min_lr=1e-6` |
+| 验证设置 | `validation_iter=500`，`max_val_iter=10` |
+| loss 设置 | 沿用 `color + latent_recon + flow + small kl`；`flow=0.002` 从微调起点即开启 |
+| 关键设置 | `checkpoint.load_training_state=False`，只加载模型权重；用于处理 base run 后期平台 |
+| 日志记录 | [stdout.log](./cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT/stdout.log) / [validation_loss_history.csv](./cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT/validation_loss_history.csv) |
+| 当前状态 | 当前最新稳定 checkpoint 为 `iter_000009000.pt`；后续续训多次在 validation 后被 `SIGKILL` |
+
+训练记录（节选）：
+
+| iter | val loss | 备注 |
+|------|----------|------|
+| 0 | `0.499023` | 从 `iter_000027000.pt` 只加载模型权重开始微调 |
+| 2000 | `0.478271` | 较起点已有改善 |
+| 5000 | `0.477881` | 持续缓慢下降 |
+| 7000 | `0.477783` | 局部平台 |
+| 8500 | `0.484204` | 小幅反弹 |
+| 9000 | `0.461572` | 当前最佳；之后在 `9500` validation 后被 `SIGKILL` |
+
+推理记录：
+
+| Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
+|------------|----------|------|-----|-----|------|------|
+| `iter_000009000` | 固定 `29 -> 8 -> 29` | `6.79 m` | `2.51 m` | `0.08` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_lrdecayft_iter9000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_lrdecayft_iter9000/histogram/10203656353524179475_7625_000_7645_000.png) | 当前这条微调分支的最新稳定单样本结果；本次未渲染点云视频 |
+
+### 7.7 `T29 LatentCompressor LRDecayFT-V2`
+
+训练设置：
+
+| 项目 | 设置 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v2` |
+| 任务形态 | `LRDecayFT` 的诊断分支，进一步降低 LR / flow，并关闭 validation media |
+| 初始化来源 | [LRDecayFT iter_000010000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT/checkpoints/iter_000010000.pt) |
+| 训练输入 | 固定总输入 `29 = 1 + 28`，空间 `512 x 896` |
+| 压缩语义 | `29 -> 8 -> 29`，第 `1` 帧旁路保留、不参与压缩 |
+| 精度 | `bfloat16` |
+| 优化设置 | `optimizer.lr=5e-6`，`scheduler=warmup_cosine`，`warmup_iters=200`，`lr_decay_iters=10000`，`min_lr=5e-7` |
+| 验证设置 | `validation_iter=500`，`max_val_iter=10`，`job.wandb_log_validation_media=False` |
+| loss 设置 | `color + latent_recon + flow + small kl`，其中 `flow=0.001` |
+| 日志记录 | [stdout.log](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V2/stdout.log) / [validation_loss_history.csv](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V2/validation_loss_history.csv) |
+| 当前状态 | 最新稳定 checkpoint 为 [iter_000005000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V2/checkpoints/iter_000005000.pt)；`5500` 轮 validation 后被 `SIGKILL` |
+
+训练记录（节选）：
+
+| iter | val loss | 备注 |
+|------|----------|------|
+| 0 | `0.473596` | 从 `LRDecayFT iter_000010000.pt` 只加载模型权重开始 |
+| 1000 | `0.468445` | |
+| 1500 | `0.467749` | |
+| 2000 | `0.464075` | 当前已记录最佳点 |
+| 3000 | `0.488928` | 中途有明显震荡 |
+| 4000 | `0.479651` | |
+| 5000 | `0.466650` | 当前最新稳定 checkpoint |
+| 5500 | —— | validation 结束后 `SIGKILL`，未写入新 checkpoint |
+
+推理记录：
+
+| Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
+|------------|----------|------|-----|-----|------|------|
+| `iter_000005000` | 固定 `29 -> 8 -> 29` | `6.77 m` | `2.48 m` | `0.08` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_lrdecayft_v2_iter5000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_lrdecayft_v2_iter5000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_t29_latent_compressor_lrdecayft_v2_iter5000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 当前诊断分支的最新稳定单样本结果；已补齐点云视频 |
 
 ## 8. 原始数据可视化
 
@@ -540,7 +685,7 @@ python cosmos-drive-dreams-toolkits/visualize_waymo_rangemap.py \
 
 ## 9. 当前已知限制
 
-- 当前 `T29 LatentCompressor` 长训已启动但尚未封顶；正式指标（RMSE/MAE/Rel）待 iter 5000+ checkpoint 推理后回填。
+- 当前 `T29 LatentCompressor`、`LRDecayFT` 与 `LRDecayFT-V2` 都已回填单条验证样本推理结果；整套验证集平均指标仍未回填。
 - 该方案只支持固定 `29` 帧，不支持变长和 streaming 长序列。
 - 当前 `T17 Streaming` 虽然支持 `29` 帧推理，但质量仍明显弱于 `CI8x8-Waymo` 的单帧重建。
 - 当前新主线使用 `color + latent_recon + delayed flow + small kl`，仍属于 v1 baseline。

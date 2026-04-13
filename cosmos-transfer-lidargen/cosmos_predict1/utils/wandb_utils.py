@@ -47,13 +47,20 @@ def init_wandb(config: Config, model: Model) -> None:
     else:
         config_job = config.job
     
-    # init the wandb id
-    wandb_id = wandb.util.generate_id()
-    log.info(f"Generating new wandb ID: {wandb_id}")
-    
-    # write to a txt file
-    with open(os.path.join(config_job.path_local, "wandb_id.txt"), "w") as f:
-        f.write(wandb_id)
+    wandb_id_path = os.path.join(config_job.path_local, "wandb_id.txt")
+    wandb_id = None
+    if os.path.exists(wandb_id_path):
+        with open(wandb_id_path, "r") as f:
+            existing_id = f.read().strip()
+        if existing_id:
+            wandb_id = existing_id
+            log.info(f"Reusing existing wandb ID: {wandb_id}")
+
+    if wandb_id is None:
+        wandb_id = wandb.util.generate_id()
+        log.info(f"Generating new wandb ID: {wandb_id}")
+        with open(wandb_id_path, "w") as f:
+            f.write(wandb_id)
     
     # refactor config so that wandb better understands it
     local_safe_yaml_fp = LazyConfig.save_yaml(config, os.path.join(config_job.path_local, "config.yaml"))
@@ -65,11 +72,13 @@ def init_wandb(config: Config, model: Model) -> None:
     wandb.init(
         force=True,
         id=wandb_id,
-        project=config_job.project,
-        group=config_job.group,
-        name=config_job.name,
+        entity=config_job.wandb_entity,
+        project=config_job.wandb_project or config_job.project,
+        group=config_job.wandb_group or config_job.group,
+        name=config_job.wandb_name or config_job.name,
         config=config_resolved,
         dir=config_job.path_local,
         resume="allow",
         mode=config_job.wandb_mode,
+        settings=wandb.Settings(init_timeout=config_job.wandb_init_timeout),
     )

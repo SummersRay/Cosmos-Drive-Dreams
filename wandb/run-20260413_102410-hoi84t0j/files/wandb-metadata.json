@@ -1,0 +1,15 @@
+{
+  "os": "Linux-5.15.0-94-generic-x86_64-with-glibc2.35",
+  "python": "CPython 3.10.20",
+  "startedAt": "2026-04-13T02:24:10.531787Z",
+  "program": "<stdin>",
+  "git": {
+    "remote": "git@github.com:SummersRay/Cosmos-Drive-Dreams.git",
+    "commit": "832388e22744b0ddfb8e1277e650f4f30e9cdba7"
+  },
+  "email": "leishuangming1103@gmail.com",
+  "root": "/root/workspace/Cosmos-Drive-Dreams",
+  "host": "lyg2105",
+  "executable": "/root/miniforge3/envs/cosmos-predict1/bin/python",
+  "writerId": "d1x3avokzvgwc69xdn4nsz6bboq9g5mw"
+}

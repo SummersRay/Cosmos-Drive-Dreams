@@ -1,0 +1,32 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            d1x3avokzvgwc69xdn4nsz6bboq9g5mw:
+                email: leishuangming1103@gmail.com
+                executable: /root/miniforge3/envs/cosmos-predict1/bin/python
+                git:
+                    commit: 832388e22744b0ddfb8e1277e650f4f30e9cdba7
+                    remote: git@github.com:SummersRay/Cosmos-Drive-Dreams.git
+                host: lyg2105
+                os: Linux-5.15.0-94-generic-x86_64-with-glibc2.35
+                program: <stdin>
+                python: CPython 3.10.20
+                root: /root/workspace/Cosmos-Drive-Dreams
+                startedAt: "2026-04-13T02:24:10.531787Z"
+                writerId: d1x3avokzvgwc69xdn4nsz6bboq9g5mw
+        m: []
+        python_version: 3.10.20
+        t:
+            "1":
+                - 105
+            "2":
+                - 105
+            "3":
+                - 2
+            "4": 3.10.20
+            "5": 0.25.1
+            "10":
+                - 20
+            "12": 0.25.1
+            "13": linux-x86_64

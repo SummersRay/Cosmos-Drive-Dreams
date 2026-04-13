@@ -161,6 +161,18 @@ class JobConfig:
     name: str = ""
     
     wandb_mode: str = "online"
+    # Optional W&B entity override. When unset, wandb uses the logged-in default entity.
+    wandb_entity: Optional[str] = None
+    # Optional W&B project override. Keeps local output paths decoupled from the online project name.
+    wandb_project: Optional[str] = None
+    # Optional W&B group override.
+    wandb_group: Optional[str] = None
+    # Optional W&B run name override.
+    wandb_name: Optional[str] = None
+    # Whether to generate validation media (videos/images/point-cloud views) for W&B.
+    wandb_log_validation_media: bool = True
+    # Timeout in seconds for wandb.init().
+    wandb_init_timeout: int = 300
 
     @property
     def path(self) -> str:
