@@ -252,6 +252,8 @@ class LatentTemporalCompressorVideoTokenizer(nn.Module):
         expected_input_frames: int = 29,
         expected_compressed_frames: int = 8,
         exact_context_frames: int = 1,
+        trainable_image_tokenizer_modules: tuple[str, ...] | list[str] | None = None,
+        trainable_image_tokenizer_lr_scale: float = 1.0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -263,6 +265,8 @@ class LatentTemporalCompressorVideoTokenizer(nn.Module):
         self.fixed_compressed_frames = expected_compressed_frames
         self.streaming_enabled = False
         self.streaming_require_full_chunks = False
+        self.trainable_image_tokenizer_modules = tuple(trainable_image_tokenizer_modules or ())
+        self.trainable_image_tokenizer_lr_scale = float(trainable_image_tokenizer_lr_scale)
 
         if self.exact_context_frames != 1:
             raise ValueError(f"{self.name} currently supports exactly one uncompressed context frame.")
@@ -279,7 +283,7 @@ class LatentTemporalCompressorVideoTokenizer(nn.Module):
         self.latent_channels = getattr(self.temporal_compressor, "latent_channels", temporal_compressor["latent_channels"])
 
         self._load_frozen_image_tokenizer_weights(frozen_image_tokenizer_ckpt)
-        self._freeze_image_tokenizer()
+        self._configure_image_tokenizer_trainability(train_mode=False)
 
         num_total_parameters = sum(param.numel() for param in self.parameters())
         num_trainable_parameters = sum(param.numel() for param in self.parameters() if param.requires_grad)
@@ -290,20 +294,40 @@ class LatentTemporalCompressorVideoTokenizer(nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        # Re-apply the freeze every time the module switches mode, so nothing can
-        # silently re-enable gradients on the 2D backbone between construction and
+        # Re-apply trainability every time the module switches mode, so nothing can
+        # silently re-enable gradients on frozen modules between construction and
         # the first training step.
-        self._freeze_image_tokenizer()
+        self._configure_image_tokenizer_trainability(train_mode=mode)
         return self
 
     def trainable_parameters(self):
-        return self.temporal_compressor.parameters()
+        return self.optimizer_parameter_groups()
+
+    def optimizer_parameter_groups(self, base_lr: float | None = None):
+        temporal_params = [param for param in self.temporal_compressor.parameters() if param.requires_grad]
+        groups = []
+        if temporal_params:
+            groups.append({"params": temporal_params})
+
+        image_params = self._trainable_image_tokenizer_parameters()
+        if image_params:
+            image_group = {"params": image_params}
+            if base_lr is not None:
+                image_group["lr"] = base_lr * self.trainable_image_tokenizer_lr_scale
+            groups.append(image_group)
+        return groups
 
     def frozen_state_dict_prefixes(self) -> tuple[str, ...]:
-        # The frozen 2D image tokenizer is fully re-hydrated from
-        # frozen_image_tokenizer_ckpt at construction time, so its weights do
-        # not need to be serialized into every training checkpoint.
-        return ("image_tokenizer.",)
+        # The frozen pieces of the 2D image tokenizer are re-hydrated from
+        # frozen_image_tokenizer_ckpt at construction time, so they do not need
+        # to be serialized into every training checkpoint.
+        top_level_modules = ("encoder", "quant_conv", "post_quant_conv", "decoder")
+        trainable_top_level = {module_name.split(".", 1)[0] for module_name in self.trainable_image_tokenizer_modules}
+        return tuple(
+            f"image_tokenizer.{module_name}."
+            for module_name in top_level_modules
+            if module_name not in trainable_top_level
+        )
 
     def encoder_jit(self):
         raise RuntimeError(f"{self.name} only supports full-model .pt inference; encoder JIT export is disabled.")
@@ -333,11 +357,41 @@ class LatentTemporalCompressorVideoTokenizer(nn.Module):
                 f"Missing keys: {disallowed_missing}. Unexpected keys: {list(unexpected_keys)}"
             )
 
-    def _freeze_image_tokenizer(self) -> None:
+    def _resolve_image_tokenizer_module(self, module_name: str) -> nn.Module:
+        module = self.image_tokenizer
+        for name_part in module_name.split("."):
+            if not hasattr(module, name_part):
+                raise ValueError(f"{self.name} cannot resolve image_tokenizer module '{module_name}'.")
+            module = getattr(module, name_part)
+        if not isinstance(module, nn.Module):
+            raise ValueError(f"{self.name} target '{module_name}' is not an nn.Module.")
+        return module
+
+    def _trainable_image_tokenizer_parameters(self) -> list[nn.Parameter]:
+        trainable_parameters = []
+        seen_parameter_ids = set()
+        for module_name in self.trainable_image_tokenizer_modules:
+            module = self._resolve_image_tokenizer_module(module_name)
+            for parameter in module.parameters():
+                if not parameter.requires_grad:
+                    continue
+                parameter_id = id(parameter)
+                if parameter_id in seen_parameter_ids:
+                    continue
+                seen_parameter_ids.add(parameter_id)
+                trainable_parameters.append(parameter)
+        return trainable_parameters
+
+    def _configure_image_tokenizer_trainability(self, train_mode: bool) -> None:
         for module_name in ("encoder", "quant_conv", "post_quant_conv", "decoder"):
             module = getattr(self.image_tokenizer, module_name)
             module.requires_grad_(False)
             module.eval()
+
+        for module_name in self.trainable_image_tokenizer_modules:
+            module = self._resolve_image_tokenizer_module(module_name)
+            module.requires_grad_(True)
+            module.train(train_mode)
 
     def _validate_input_frames(self, tensor: torch.Tensor, expected_frames: int, tensor_name: str) -> None:
         if tensor.ndim != 5:

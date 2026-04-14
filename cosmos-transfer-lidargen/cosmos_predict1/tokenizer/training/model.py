@@ -72,10 +72,24 @@ class TokenizerModel(Model):
             optimizer (torch.optim.Optimizer): The net optimizer.
             scheduler (torch.optim.lr_scheduler.LRScheduler): The net optimization scheduler.
         """
-        optimizer_config.params = (
-            self.network.trainable_parameters() if hasattr(self.network, "trainable_parameters") else self.network.parameters()
-        )
-        optimizer = instantiate(optimizer_config)
+        if hasattr(self.network, "optimizer_parameter_groups"):
+            optimizer_target = instantiate(optimizer_config._target_)
+            optimizer_kwargs = {
+                key: instantiate(value)
+                for key, value in optimizer_config.items()
+                if key not in {"_target_", "params"}
+            }
+            optimizer = optimizer_target(
+                self.network.optimizer_parameter_groups(base_lr=getattr(optimizer_config, "lr", None)),
+                **optimizer_kwargs,
+            )
+        else:
+            optimizer_config.params = (
+                self.network.trainable_parameters()
+                if hasattr(self.network, "trainable_parameters")
+                else self.network.parameters()
+            )
+            optimizer = instantiate(optimizer_config)
         scheduler_config.optimizer = optimizer
         scheduler = instantiate(scheduler_config)
 

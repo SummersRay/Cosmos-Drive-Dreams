@@ -161,6 +161,11 @@ class WandBLidarCallback(callback.Callback):
             output_batches=[],
             loss=torch.tensor(0.0, device="cuda"),
             sample_size=torch.tensor(0, device="cuda"),
+            loss_sums={},
+            depth_abs_sum=torch.tensor(0.0, device="cuda", dtype=torch.float64),
+            depth_sq_sum=torch.tensor(0.0, device="cuda", dtype=torch.float64),
+            depth_rel_sum=torch.tensor(0.0, device="cuda", dtype=torch.float64),
+            depth_count=torch.tensor(0.0, device="cuda", dtype=torch.float64),
         )
         
     def on_validation_step_end(
@@ -176,6 +181,10 @@ class WandBLidarCallback(callback.Callback):
         batch_size = data_batch[_input_key].shape[0]
         self._val_cache["loss"] += loss * batch_size
         self._val_cache["sample_size"] += batch_size
+        for loss_key, loss_val in output_batch.get("loss", dict()).items():
+            if loss_key not in self._val_cache["loss_sums"]:
+                self._val_cache["loss_sums"][loss_key] = torch.tensor(0.0, device="cuda")
+            self._val_cache["loss_sums"][loss_key] += loss_val.detach() * batch_size
 
         input_images = data_batch[_input_key].float()  # shape: [N, 3, H, w]
         output_images = output_batch[PREDICTION].float()
@@ -250,10 +259,20 @@ class WandBLidarCallback(callback.Callback):
 
             range_map_input = input_images[valid_mask]
             range_map_recon = output_images[valid_mask]
+            range_map_diff = range_map_input - range_map_recon
 
-            mae = torch.abs(range_map_input - range_map_recon).mean().item()
-            rmse = torch.sqrt(torch.mean((range_map_input - range_map_recon) ** 2)).item()
-            relative_error = (torch.abs(range_map_input - range_map_recon) / (range_map_input + 1e-6)).mean().item()
+            mae = torch.abs(range_map_diff).mean().item()
+            rmse = torch.sqrt(torch.mean(range_map_diff**2)).item()
+            relative_error = (torch.abs(range_map_diff) / (range_map_input + 1e-6)).mean().item()
+
+            self._val_cache["depth_abs_sum"] += torch.abs(range_map_diff).sum().to(torch.float64)
+            self._val_cache["depth_sq_sum"] += torch.square(range_map_diff).sum().to(torch.float64)
+            self._val_cache["depth_rel_sum"] += (
+                torch.abs(range_map_diff) / (range_map_input + 1e-6)
+            ).sum().to(torch.float64)
+            self._val_cache["depth_count"] += torch.tensor(
+                float(range_map_input.numel()), device="cuda", dtype=torch.float64
+            )
 
         else:
             mae = None
@@ -289,11 +308,39 @@ class WandBLidarCallback(callback.Callback):
         # Compute the average validation loss across all devices.
         dist.all_reduce(self._val_cache["loss"], op=dist.ReduceOp.SUM)
         dist.all_reduce(self._val_cache["sample_size"], op=dist.ReduceOp.SUM)
+        dist.all_reduce(self._val_cache["depth_abs_sum"], op=dist.ReduceOp.SUM)
+        dist.all_reduce(self._val_cache["depth_sq_sum"], op=dist.ReduceOp.SUM)
+        dist.all_reduce(self._val_cache["depth_rel_sum"], op=dist.ReduceOp.SUM)
+        dist.all_reduce(self._val_cache["depth_count"], op=dist.ReduceOp.SUM)
+        for loss_key in sorted(self._val_cache["loss_sums"]):
+            dist.all_reduce(self._val_cache["loss_sums"][loss_key], op=dist.ReduceOp.SUM)
         loss = self._val_cache["loss"].item() / self._val_cache["sample_size"]
         # Log data/stats of validation set to W&B.
         if distributed.is_rank0():
             log.info(f"Validation loss (iteration {iteration}): {loss:4f}")
             wandb.log({"val/loss": loss}, step=iteration)
+            if self._val_cache["loss_sums"]:
+                loss_means = {
+                    loss_key: (loss_sum.item() / self._val_cache["sample_size"])
+                    for loss_key, loss_sum in sorted(self._val_cache["loss_sums"].items())
+                }
+                loss_breakdown = ", ".join(f"{loss_key}={loss_val:.6f}" for loss_key, loss_val in loss_means.items())
+                log.info(f"Validation loss breakdown (iteration {iteration}): {loss_breakdown}")
+                if wandb.run is not None:
+                    for loss_key, loss_val in loss_means.items():
+                        wandb.log({f"val_agg/{loss_key}": loss_val}, step=iteration)
+            if self._val_cache["depth_count"].item() > 0:
+                depth_mae = (self._val_cache["depth_abs_sum"] / self._val_cache["depth_count"]).item()
+                depth_rmse = torch.sqrt(self._val_cache["depth_sq_sum"] / self._val_cache["depth_count"]).item()
+                depth_rel = (self._val_cache["depth_rel_sum"] / self._val_cache["depth_count"]).item()
+                log.info(
+                    f"Validation depth metrics (iteration {iteration}): "
+                    f"mae={depth_mae:.6f}, rmse={depth_rmse:.6f}, rel={depth_rel:.6f}"
+                )
+                if wandb.run is not None:
+                    wandb.log({"val_agg/depth_mae": depth_mae}, step=iteration)
+                    wandb.log({"val_agg/depth_rmse": depth_rmse}, step=iteration)
+                    wandb.log({"val_agg/depth_relative_error": depth_rel}, step=iteration)
 
     def on_train_end(self, model: Model, iteration: int = 0) -> None:
         wandb.finish()

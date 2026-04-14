@@ -145,3 +145,53 @@ def test_latent_temporal_compressor_only_backprops_through_temporal_model(tmp_pa
     )
     assert any(parameter.grad is not None for parameter in model.temporal_compressor.parameters())
     assert all(parameter.grad is None for parameter in model.image_tokenizer.parameters())
+
+
+def test_latent_temporal_compressor_can_finetune_decoder_modules_only(tmp_path: Path):
+    image_config = _tiny_image_tokenizer_config()
+    checkpoint_path, _ = _write_image_tokenizer_checkpoint(tmp_path, image_config)
+
+    model = LatentTemporalCompressorVideoTokenizer(
+        image_tokenizer=image_config,
+        temporal_compressor=_tiny_temporal_compressor_config(resolution=4),
+        frozen_image_tokenizer_ckpt=str(checkpoint_path),
+        expected_input_frames=29,
+        expected_compressed_frames=8,
+        exact_context_frames=1,
+        trainable_image_tokenizer_modules=("post_quant_conv", "decoder"),
+        trainable_image_tokenizer_lr_scale=0.2,
+    )
+    model.train()
+
+    input_video = torch.randn(1, 3, 29, 32, 32)
+    output_batch = model(input_video)
+    loss = output_batch["reconstructions"].sum()
+    loss.backward()
+
+    assert all(parameter.grad is None for parameter in model.image_tokenizer.encoder.parameters())
+    assert all(parameter.grad is None for parameter in model.image_tokenizer.quant_conv.parameters())
+    assert any(parameter.grad is not None for parameter in model.image_tokenizer.post_quant_conv.parameters())
+    assert any(parameter.grad is not None for parameter in model.image_tokenizer.decoder.parameters())
+
+
+def test_latent_temporal_compressor_optimizer_groups_apply_lr_scale(tmp_path: Path):
+    image_config = _tiny_image_tokenizer_config()
+    checkpoint_path, _ = _write_image_tokenizer_checkpoint(tmp_path, image_config)
+
+    model = LatentTemporalCompressorVideoTokenizer(
+        image_tokenizer=image_config,
+        temporal_compressor=_tiny_temporal_compressor_config(resolution=4),
+        frozen_image_tokenizer_ckpt=str(checkpoint_path),
+        expected_input_frames=29,
+        expected_compressed_frames=8,
+        exact_context_frames=1,
+        trainable_image_tokenizer_modules=("post_quant_conv", "decoder"),
+        trainable_image_tokenizer_lr_scale=0.2,
+    )
+
+    param_groups = model.optimizer_parameter_groups(base_lr=5e-6)
+    assert len(param_groups) == 2
+    assert "lr" not in param_groups[0]
+    assert abs(param_groups[1]["lr"] - 1e-6) < 1e-12
+    assert len(param_groups[0]["params"]) > 0
+    assert len(param_groups[1]["params"]) > 0

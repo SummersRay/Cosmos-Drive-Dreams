@@ -36,6 +36,7 @@ from cosmos_predict1.tokenizer.training.losses.continuous import (
     KLLoss,
     LatentReconstructionLoss,
     PerceptualLoss,
+    TemporalDeltaLoss,
     TokenizerLoss,
     VideoConsistencyLoss,
 )
@@ -88,6 +89,13 @@ class LatentReconstructionConfig:
 
 
 @attrs.define(slots=False)
+class TemporalDeltaConfig:
+    boundaries: list[int] = [0]
+    values: list[float] = [0.0]
+    enabled: bool = False
+
+
+@attrs.define(slots=False)
 class FlowConfig:
     # Flow loss and its weight schedule.
     boundaries: list[int] = [250000]
@@ -119,6 +127,7 @@ class VideoLoss:
     # The combined loss function, and its reduction mode.
     color: LazyDict = L(ColorLoss)(config=ColorConfig())
     latent_recon: LazyDict = L(LatentReconstructionLoss)(config=LatentReconstructionConfig())
+    temporal_delta: LazyDict = L(TemporalDeltaLoss)(config=TemporalDeltaConfig())
     kl: LazyDict = L(KLLoss)(config=KLConfig())
     perceptual: LazyDict = L(PerceptualLoss)(config=PerceptualConfig())
     flow: LazyDict = L(FlowLoss)(config=FlowConfig())

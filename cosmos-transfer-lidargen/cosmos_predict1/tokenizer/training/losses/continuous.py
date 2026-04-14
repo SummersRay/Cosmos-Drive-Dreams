@@ -27,7 +27,7 @@ from cosmos_predict1.tokenizer.training.losses import ReduceMode
 from cosmos_predict1.tokenizer.training.losses.lpips import LPIPS
 from cosmos_predict1.utils.lazy_config import instantiate
 
-_VALID_LOSS_NAMES = ["color", "latent_recon", "perceptual", "flow", "kl", "video_consistency"]
+_VALID_LOSS_NAMES = ["color", "latent_recon", "temporal_delta", "perceptual", "flow", "kl", "video_consistency"]
 VIDEO_CONSISTENCY_LOSS = "video_consistency"
 RECON_CONSISTENCY_KEY = f"{RECON_KEY}_consistency"
 RECONSTRUCTED_LATENTS_KEY = "reconstructed_latents"
@@ -92,6 +92,50 @@ class ColorLoss(torch.nn.Module):
         return dict(color=color_weighted)
 
 
+def _resize_spatial_loss_mask(mask: torch.Tensor, target_hw: tuple[int, int]) -> torch.Tensor:
+    """Resize a spatial loss mask with conservative pooling when downsampling."""
+
+    if mask.shape[-2:] == target_hw:
+        return mask
+
+    mask_h, mask_w = mask.shape[-2:]
+    target_h, target_w = target_hw
+    if target_h <= mask_h and target_w <= mask_w:
+        # Conservative latent gating: keep a cell active if any contributing source pixel is valid.
+        return F.adaptive_max_pool2d(mask, output_size=target_hw)
+    return F.interpolate(mask, size=target_hw, mode="nearest")
+
+
+def _resize_loss_mask(mask: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Resize a pixel-space loss mask to match the target tensor layout."""
+
+    if mask.ndim != target.ndim:
+        raise ValueError(f"Loss mask rank {mask.ndim} does not match target rank {target.ndim}.")
+
+    if mask.ndim == 5:
+        if mask.shape[2] != target.shape[2]:
+            raise ValueError(
+                f"Temporal loss mask length {mask.shape[2]} does not match target length {target.shape[2]}."
+            )
+        mask = mask[:, :1]
+        batch_size, _, num_frames, mask_h, mask_w = mask.shape
+        target_h, target_w = target.shape[-2:]
+        if (mask_h, mask_w) != (target_h, target_w):
+            mask = mask.permute(0, 2, 1, 3, 4).reshape(batch_size * num_frames, 1, mask_h, mask_w)
+            mask = _resize_spatial_loss_mask(mask, (target_h, target_w))
+            mask = mask.reshape(batch_size, num_frames, 1, target_h, target_w).permute(0, 2, 1, 3, 4)
+        return mask.expand(-1, target.shape[1], -1, -1, -1).to(dtype=target.dtype)
+
+    if mask.ndim == 4:
+        mask = mask[:, :1]
+        target_h, target_w = target.shape[-2:]
+        if mask.shape[-2:] != (target_h, target_w):
+            mask = _resize_spatial_loss_mask(mask, (target_h, target_w))
+        return mask.expand(-1, target.shape[1], -1, -1).to(dtype=target.dtype)
+
+    raise ValueError(f"Unsupported loss mask rank {mask.ndim}.")
+
+
 class KLLoss(torch.nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
@@ -126,10 +170,40 @@ class LatentReconstructionLoss(torch.nn.Module):
         latent_diff = torch.abs(
             output_batch[RECONSTRUCTED_LATENTS_KEY].contiguous() - output_batch[TARGET_LATENTS_KEY].contiguous()
         )
+        latent_mask = _resize_loss_mask(inputs[MASK_KEY], output_batch[RECONSTRUCTED_LATENTS_KEY])
+        latent_diff = latent_mask * latent_diff
         latent_recon = self.schedule(iteration) * latent_diff
         if torch.isnan(latent_recon).any():
             raise ValueError("[LATENT_RECON] NaN detected in loss")
         return dict(latent_recon=latent_recon)
+
+
+class TemporalDeltaLoss(torch.nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.schedule = WeightScheduler(boundaries=config.boundaries, values=config.values)
+        self.enabled = getattr(config, "enabled", True)
+
+    def forward(self, inputs, output_batch, iteration) -> dict[str, torch.Tensor]:
+        if not self.enabled:
+            return dict()
+
+        input_images = inputs[INPUT_KEY]
+        if input_images.ndim != 5 or input_images.shape[2] <= 1:
+            return dict()
+
+        curr_weight = self.schedule(iteration)
+        if curr_weight == 0.0:
+            return dict()
+
+        reconstructions = output_batch[RECON_KEY]
+        input_delta = input_images[:, :, 1:, :, :] - input_images[:, :, :-1, :, :]
+        recon_delta = reconstructions[:, :, 1:, :, :] - reconstructions[:, :, :-1, :, :]
+        weights = torch.minimum(inputs[MASK_KEY][:, :, 1:, :, :], inputs[MASK_KEY][:, :, :-1, :, :])
+        temporal_delta = curr_weight * weights * torch.abs(input_delta.contiguous() - recon_delta.contiguous())
+        if torch.isnan(temporal_delta).any():
+            raise ValueError("[TEMPORAL_DELTA] NaN detected in loss")
+        return dict(temporal_delta=temporal_delta)
 
 
 class PerceptualLoss(LPIPS):
