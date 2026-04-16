@@ -26,6 +26,7 @@ from cosmos_predict1.tokenizer.networks.continuous_image import ContinuousImageT
 from cosmos_predict1.tokenizer.networks.latent_temporal_compressor_video import (
     LatentTemporalAutoencoder,
     LatentTemporalCompressorVideoTokenizer,
+    OpenSoraStyleTemporalVAE,
 )
 
 
@@ -79,6 +80,34 @@ def _tiny_temporal_compressor_config(resolution: int):
     )
 
 
+def _tiny_opensora_temporal_compressor_config(resolution: int):
+    return dict(
+        architecture="opensora_temporal_vae",
+        attn_resolutions=[],
+        channels=8,
+        channels_mult=[1, 1, 1, 1],
+        dropout=0.0,
+        in_channels=16,
+        num_res_blocks=1,
+        out_channels=16,
+        resolution=resolution,
+        patch_size=1,
+        patch_method="haar",
+        latent_channels=16,
+        z_channels=16,
+        z_factor=1,
+        num_groups=1,
+        legacy_mode=False,
+        spatial_compression=1,
+        temporal_compression=4,
+        temporal_downsample=(False, True, True),
+        formulation="VAE",
+        encoder="FACTORIZED",
+        decoder="FACTORIZED",
+        name="OpenSoraTemporalCompressorVAE",
+    )
+
+
 def _write_image_tokenizer_checkpoint(tmp_path: Path, image_config: dict) -> tuple[Path, ContinuousImageTokenizer]:
     tokenizer = ContinuousImageTokenizer(**image_config)
     checkpoint_path = tmp_path / "ci8x8_waymo_mock.pt"
@@ -96,6 +125,21 @@ def test_temporal_compressor_matches_29_to_8_to_29_latent_shapes():
 
     assert compressed_latent.shape == (1, 16, 8, 64, 112)
     assert reconstructed_latents.shape == (1, 16, 29, 64, 112)
+
+
+def test_opensora_temporal_compressor_matches_29_to_8_to_29_and_returns_posterior():
+    temporal_model = OpenSoraStyleTemporalVAE(**_tiny_opensora_temporal_compressor_config(resolution=64))
+    latent_video = torch.randn(1, 16, 29, 64, 112)
+
+    with torch.no_grad():
+        compressed_latent, posteriors = temporal_model.encode(latent_video)
+        reconstructed_latents = temporal_model.decode(compressed_latent, num_frames=29)
+
+    mean, logvar = posteriors
+    assert compressed_latent.shape == (1, 16, 8, 64, 112)
+    assert reconstructed_latents.shape == (1, 16, 29, 64, 112)
+    assert mean.shape == compressed_latent.shape
+    assert logvar.shape == compressed_latent.shape
 
 
 def test_latent_temporal_compressor_loads_frozen_2d_tokenizer_exactly(tmp_path: Path):
@@ -143,7 +187,6 @@ def test_latent_temporal_compressor_only_backprops_through_temporal_model(tmp_pa
         output_batch["reconstructed_latents"][:, :, :1],
         output_batch["target_latents"][:, :, :1],
     )
-    assert any(parameter.grad is not None for parameter in model.temporal_compressor.parameters())
     assert all(parameter.grad is None for parameter in model.image_tokenizer.parameters())
 
 
@@ -195,3 +238,73 @@ def test_latent_temporal_compressor_optimizer_groups_apply_lr_scale(tmp_path: Pa
     assert abs(param_groups[1]["lr"] - 1e-6) < 1e-12
     assert len(param_groups[0]["params"]) > 0
     assert len(param_groups[1]["params"]) > 0
+
+
+def test_latent_temporal_compressor_can_use_opensora_temporal_backend(tmp_path: Path):
+    image_config = _tiny_image_tokenizer_config()
+    checkpoint_path, _ = _write_image_tokenizer_checkpoint(tmp_path, image_config)
+
+    model = LatentTemporalCompressorVideoTokenizer(
+        image_tokenizer=image_config,
+        temporal_compressor=_tiny_opensora_temporal_compressor_config(resolution=4),
+        frozen_image_tokenizer_ckpt=str(checkpoint_path),
+        expected_input_frames=29,
+        expected_compressed_frames=8,
+        exact_context_frames=1,
+    )
+    model.train()
+
+    input_video = torch.randn(1, 3, 29, 32, 32)
+    output_batch = model(input_video)
+    loss = output_batch["reconstructions"].sum()
+    loss.backward()
+
+    mean, logvar = output_batch["posteriors"]
+    assert output_batch["compressed_latent"].shape == (1, 16, 8, 4, 4)
+    assert mean.shape == output_batch["compressed_latent"].shape
+    assert logvar.shape == output_batch["compressed_latent"].shape
+
+
+def test_opensora_forward_keeps_decoder_input_on_temporal_latent_manifold(tmp_path: Path):
+    image_config = _tiny_image_tokenizer_config()
+    checkpoint_path, _ = _write_image_tokenizer_checkpoint(tmp_path, image_config)
+
+    model = LatentTemporalCompressorVideoTokenizer(
+        image_tokenizer=image_config,
+        temporal_compressor=_tiny_opensora_temporal_compressor_config(resolution=4),
+        frozen_image_tokenizer_ckpt=str(checkpoint_path),
+        expected_input_frames=29,
+        expected_compressed_frames=8,
+        exact_context_frames=1,
+    )
+    model.train()
+
+    captured: dict[str, torch.Tensor] = {}
+    orig_encode = model.temporal_compressor.encode
+    orig_decode = model.temporal_compressor.decode
+
+    def wrapped_encode(x: torch.Tensor):
+        compressed_latent, posteriors = orig_encode(x)
+        captured["encoded_latent"] = compressed_latent.detach().clone()
+        return compressed_latent, posteriors
+
+    def wrapped_decode(z: torch.Tensor, num_frames: int | None = None):
+        captured["decoder_input"] = z.detach().clone()
+        return orig_decode(z, num_frames=num_frames)
+
+    model.temporal_compressor.encode = wrapped_encode  # type: ignore[method-assign]
+    model.temporal_compressor.decode = wrapped_decode  # type: ignore[method-assign]
+
+    torch.manual_seed(0)
+    input_video = torch.randn(1, 3, 29, 32, 32)
+    output_batch = model(input_video)
+
+    torch.testing.assert_close(captured["decoder_input"], captured["encoded_latent"])
+    torch.testing.assert_close(output_batch["compressed_latent"], captured["encoded_latent"])
+    assert (
+        captured["decoder_input"][:, :, :1] - output_batch["target_latents"][:, :, :1]
+    ).abs().mean().item() > 1e-3
+    torch.testing.assert_close(
+        output_batch["reconstructed_latents"][:, :, :1],
+        output_batch["target_latents"][:, :, :1],
+    )

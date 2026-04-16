@@ -642,6 +642,220 @@ Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V4["model"]["config"]
     "trainable_image_tokenizer_lr_scale"
 ] = 0.2
 
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5: LazyDict = deepcopy(
+    Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V4
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["job"]["name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V5"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["job"]["wandb_name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V5"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["checkpoint"]["load_path"] = (
+    "checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V4/"
+    "checkpoints/iter_000008000.pt"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["checkpoint"]["load_training_state"] = False
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["checkpoint"]["save_iter"] = 500
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["trainer"].update(
+    {
+        "max_iter": 10000,
+        "validation_iter": 500,
+        "max_val_iter": 5,
+        "logging_iter": 100,
+    }
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["dataloader_val"] = dict(
+    prefetch_factor=2,
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["optimizer"]["lr"] = 3e-6
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["scheduler"] = dict(
+    warmup_iters=200,
+    lr_decay_iters=10000,
+    min_lr=5e-7,
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["model"]["config"]["network"][
+    "trainable_image_tokenizer_modules"
+] = ("quant_conv", "post_quant_conv", "decoder")
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["model"]["config"]["network"][
+    "trainable_image_tokenizer_lr_scale"
+] = 0.1
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["model"]["config"]["loss"]["config"][
+    "latent_recon"
+]["config"] = dict(boundaries=[6500], values=[0.25, 0.1])
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["model"]["config"]["loss"]["config"][
+    "temporal_delta"
+]["config"] = dict(enabled=True, boundaries=[0], values=[0.35])
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5["model"]["config"]["loss"]["config"]["flow"][
+    "config"
+] = dict(enabled=False, boundaries=[0], values=[0.0], scale=4, dtype="bfloat16", checkpoint_activations=True)
+
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1: LazyDict = deepcopy(
+    Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["defaults"] = [
+    {"override /network": "latent_temporal_compressor_video"},
+    {"override /loss": "video"},
+    {"override /data_train": "lidar_range_map_video_rRow4_waymo_t29_latent"},
+    {"override /data_val": "lidar_range_map_video_rRow4_waymo_t29_latent"},
+    {"override /optimizer": "fused_adam"},
+    {"override /scheduler": "warmup_cosine"},
+    {"override /callbacks": ["basic", "wandbLidar"]},
+    "_self_",
+]
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["job"]["name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["job"]["wandb_name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["job"]["wandb_mode"] = "offline"
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["job"]["wandb_log_validation_media"] = False
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["checkpoint"]["load_path"] = ""
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["checkpoint"]["load_training_state"] = False
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["checkpoint"]["save_iter"] = 500
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["trainer"].update(
+    {
+        "max_iter": 30000,
+        "validation_iter": 500,
+        "max_val_iter": 5,
+        "logging_iter": 100,
+    }
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["dataloader_val"] = dict(
+    prefetch_factor=2,
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["optimizer"]["lr"] = 1e-5
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["scheduler"] = dict(
+    warmup_iters=500,
+    lr_decay_iters=30000,
+    min_lr=1e-6,
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["model"]["config"]["network"][
+    "temporal_compressor"
+] = dict(
+    architecture="opensora_temporal_vae",
+    channels=64,
+    channels_mult=[1, 2, 2, 4],
+    dropout=0.0,
+    in_channels=16,
+    num_res_blocks=2,
+    out_channels=16,
+    resolution=64,
+    patch_size=1,
+    patch_method="haar",
+    latent_channels=16,
+    z_channels=16,
+    z_factor=1,
+    num_groups=16,
+    legacy_mode=False,
+    spatial_compression=1,
+    temporal_compression=4,
+    temporal_downsample=(False, True, True),
+    formulation="VAE",
+    encoder="FACTORIZED",
+    decoder="FACTORIZED",
+    name="OpenSoraTemporalCompressorVAE",
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["model"]["config"]["network"][
+    "trainable_image_tokenizer_modules"
+] = ()
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["model"]["config"]["network"][
+    "trainable_image_tokenizer_lr_scale"
+] = 1.0
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["model"]["config"]["loss"]["config"][
+    "color"
+] = dict(config=dict(boundaries=[0], values=[0.1]))
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["model"]["config"]["loss"]["config"][
+    "latent_recon"
+] = dict(config=dict(boundaries=[0], values=[1.0]))
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["model"]["config"]["loss"]["config"][
+    "temporal_delta"
+] = dict(config=dict(enabled=False, boundaries=[0], values=[0.0]))
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1["model"]["config"]["loss"]["config"]["flow"][
+    "config"
+] = dict(enabled=False, boundaries=[0], values=[0.0], scale=4, dtype="bfloat16", checkpoint_activations=True)
+
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2: LazyDict = deepcopy(
+    Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["job"]["name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["job"]["wandb_name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["checkpoint"]["load_path"] = (
+    "checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/"
+    "checkpoints/iter_000029500.pt"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["trainer"].update(
+    {
+        "max_iter": 40000,
+        "validation_iter": 500,
+        "max_val_iter": 5,
+        "logging_iter": 100,
+    }
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["optimizer"]["lr"] = 3e-6
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["scheduler"] = dict(
+    warmup_iters=200,
+    lr_decay_iters=40000,
+    min_lr=5e-7,
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["model"]["config"]["network"][
+    "trainable_image_tokenizer_modules"
+] = ("post_quant_conv", "decoder")
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["model"]["config"]["network"][
+    "trainable_image_tokenizer_lr_scale"
+] = 0.1
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["model"]["config"]["loss"]["config"][
+    "color"
+] = dict(config=dict(boundaries=[0], values=[0.25]))
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["model"]["config"]["loss"]["config"][
+    "latent_recon"
+] = dict(config=dict(boundaries=[0], values=[1.0]))
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2["model"]["config"]["loss"]["config"][
+    "temporal_delta"
+] = dict(config=dict(enabled=True, boundaries=[0], values=[0.1]))
+
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3: LazyDict = deepcopy(
+    Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["job"]["name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S3"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["job"]["wandb_name"] = (
+    "Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S3"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["checkpoint"]["load_path"] = (
+    "checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2/"
+    "checkpoints/REPLACE_WITH_BEST_S2_CHECKPOINT.pt"
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["trainer"].update(
+    {
+        "max_iter": 6000,
+        "validation_iter": 500,
+        "max_val_iter": 5,
+        "logging_iter": 100,
+    }
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["optimizer"]["lr"] = 2e-6
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["scheduler"] = dict(
+    warmup_iters=100,
+    lr_decay_iters=6000,
+    min_lr=2e-7,
+)
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["model"]["config"]["loss"]["config"][
+    "color"
+] = dict(config=dict(boundaries=[0], values=[1.0]))
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["model"]["config"]["loss"]["config"][
+    "latent_recon"
+] = dict(config=dict(boundaries=[1000], values=[0.25, 0.05]))
+Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["model"]["config"]["loss"]["config"][
+    "temporal_delta"
+] = dict(config=dict(enabled=True, boundaries=[0], values=[0.25]))
+
 cs = ConfigStore.instance()
 
 for experiment_name, experiment_cfg in [
@@ -668,6 +882,22 @@ for experiment_name, experiment_cfg in [
     (
         "cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v4",
         Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V4,
+    ),
+    (
+        "cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v5",
+        Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_LRDecayFT_V5,
+    ),
+    (
+        "cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s1",
+        Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S1,
+    ),
+    (
+        "cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s2",
+        Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S2,
+    ),
+    (
+        "cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s3",
+        Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3,
     ),
 ]:
     log.info(f"Registering experiment: {experiment_name}")

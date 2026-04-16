@@ -2,54 +2,44 @@
 
 ## 1. 总览
 
-当前推荐路线是一个两阶段方案：
+当前文档默认以 `CI8x8-Waymo + OpenSora-S1/S2/S3` 为主线，不再把 `V3/V4/V5` 作为新的起点。
+
+推荐路线：
 - Stage 1：`CI8x8-Waymo`
   先把 2D image tokenizer 适配到 Waymo TOP range map，建立稳定的单帧空间重建能力。
-- Stage 2：`T29 LatentCompressor`
-  冻结 `CI8x8-Waymo` 的 2D tokenizer，仅训练 latent-side temporal compressor，在 latent 空间做 `1 + 28 -> 1 + 7 -> 1 + 28`。
+- Stage 2-S1：`OpenSora-S1`
+  冻结 2D tokenizer，只训 temporal compressor，在固定 `29 -> 8 -> 29` 设定下做 latent-dominant 训练。
+- Stage 2-S2：`OpenSora-S2`
+  从 `S1` 最佳 checkpoint 接力，放开 `post_quant_conv + decoder` 做 joint finetune，仍以 latent 重建为主（`latent_recon=1.0, color=0.25`）。
+- Stage 2-S3：`OpenSora-S3`
+  从 `S2` 最佳 checkpoint 接力，切到像素重建主导（`color=1.0, latent_recon=0.25→0.05`）。
 
-### 1.1 当前主线
+这条线只重新加载
+[CI8x8-Waymo iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt)，
+不复用历史 3D checkpoint；同时 temporal compressor 已经切到参考
+[/root/workspace/Open-Sora/opensora/models/vae/vae_temporal.py](/root/workspace/Open-Sora/opensora/models/vae/vae_temporal.py:325)
+的 `opensora_temporal_vae` backend。
 
-| 阶段 | 实验名 | 作用 | 初始化来源 | 当前状态 |
-|------|--------|------|------------|----------|
-| Stage 1 | `cosmos_lidar_tokenizer_waymo` | Waymo 2D 域适配 | 通用 `CI8x8-Lidar` | 已完成 |
-| Stage 2 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor` | 冻结 2D tokenizer + latent-side temporal compressor | `CI8x8-Waymo iter_000020000.pt` | 当前主线，长训中 |
-| Stage 2-FT | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft` | 后期降 LR 微调变体 | `T29 LatentCompressor iter_000027000.pt` | 长训中，当前从 `iter_000009000.pt` 续到总 `20000` iter |
-| Stage 2-FT-V2 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v2` | 更小 LR + 更低 flow + validation media 关闭 | `LRDecayFT iter_000010000.pt` | 当前最新稳定 checkpoint 为 `iter_000005000.pt`；`5500` 轮 validation 后被 `SIGKILL` |
-| Stage 2-FT-V3 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v3` | `masked latent_recon + temporal_delta` 优化分支 | `LRDecayFT iter_000009000.pt` | 8 卡长训中；`validation_iter=500`，当前按聚合 depth 指标的最佳点是 `iter_000007500.pt` |
-| Stage 2-FT-V4 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v4` | 方案 A：轻量 joint finetune decoder 分支 | `V3 iter_000008000.pt` | 已实现并启动；当前在初始 validation `4/5` 处再次被 `SIGKILL`，尚无稳定 checkpoint |
+### 1.1 当前推荐主线
 
-### 1.2 关键结论
+| 阶段 | 实验名 | 初始化来源 | 说明 | 当前状态 |
+|------|--------|------------|------|----------|
+| Stage 1 | `cosmos_lidar_tokenizer_waymo` | 通用 `CI8x8-Lidar` | Waymo 2D tokenizer | 已完成 |
+| S1 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s1` | `CI8x8-Waymo iter_000020000.pt` | 冻结 2D，只训 Open-Sora 风格 temporal VAE | `2026-04-16` 已完成 `30000` iter；总 loss / latent best 为 `iter_000025500.pt` |
+| S2 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s2` | `OpenSora-S1-BypassFix iter_000029500.pt` | 放开 `post_quant_conv + decoder`，latent 主导 joint finetune | `2026-04-16` loss 权重修正后重新启动 |
+| S3 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s3` | `OpenSora-S2 best checkpoint` | 切到像素重建主导 | 配置已就绪，待 `S2` 收敛后接力 |
 
-- stage-1 已完成，最终权重是 [iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt)
-- 当前主线固定语义是 `29 -> 8 -> 29`，其中第 `1` 帧旁路保留，不参与时间压缩
-- 当前主线已通过 `1GPU / 8GPU` 训练 smoke 和固定 `29` 帧推理 smoke
-- 当前主线正式长训已于 `2026-04-11` 启动，并在 `2026-04-12` 从 `iter_000017000.pt` 续训到总 `40000` iter
-- 针对 `22500+` 后验证 loss 震荡平台，新增了 `LRDecayFT` 变体：从 `iter_000027000.pt` 只加载模型权重续训，改用较小 LR + cosine decay + 更稳的 val 统计
-- `LRDecayFT` 到 `iter_000009000.pt` 的单条验证样本推理结果为 `RMSE 6.79 / MAE 2.51 / Rel 0.08`，优于当前已记录的 base `T29` `iter_000017000`
-- `LRDecayFT-V2` 到 `iter_000005000.pt` 的单条验证样本推理结果为 `RMSE 6.77 / MAE 2.48 / Rel 0.08`，并已补齐 range / histogram / point-cloud 三类产物
-- 当前平台期判断更偏向“优化目标瓶颈”，不是单纯训练时长不足：已新增 `V3` 分支，改为 `masked latent_recon + temporal_delta`，并把聚合 `depth mae/rmse/rel` 输出到日志与独立 CSV
-- `V3` 的 latent mask 缩放不再用 `nearest` 单点采样，而改成 conservative max-pooling；不过 latent_recon 上的 masking 仍只是“权重再分配”的近似，因为 2D encoder 的感受野会跨越多个原始像素
-- `V3` 这条线当前更应该按聚合 `depth_mae / depth_rmse / depth_relative_error` 选 checkpoint，而不是只看总 `validation_loss`；到目前为止综合最佳点是 `iter_000007500.pt`
-- 方案 A（`V4`）已经落地：保持 latent compressor 架构不变，解冻 `post_quant_conv + decoder`，并对解冻的 2D decoder 侧使用更小 LR；当前代码接线与优化器分组已验证通过
-- 历史对比主线 `T17 Streaming` 仍保留，最新稳定 checkpoint 是 [iter_000017000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CV4x8x8-Waymo-T17-Streaming/checkpoints/iter_000017000.pt)
+### 1.2 阅读建议
 
-### 1.3 实验状态速览
+- 如果是新实验，直接看 §2、§5.4、§7.11，不需要从 `V3/V4/V5` 接着训。
+- 历史 `T29 / LRDecayFT / V3 / V4 / V5` 仍保留在后文，主要用于对比，不再作为当前推荐初始化来源。
+- 当前固定设定只有一条：`29 -> 8 -> 29`，保留首帧旁路，不做变长。
 
-| 实验 | 类型 | 状态 | 初始化来源 | 备注 |
-|------|------|------|------------|------|
-| `cosmos_lidar_tokenizer_waymo` | `CI8x8-Waymo` | 已完成 | 通用 `CI8x8-Lidar` | stage-1 主线 |
-| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor` | `T29 LatentCompressor` | 长训中 | `CI8x8-Waymo iter_000020000.pt` | 当前主线；详见 §7.5 |
-| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft` | `T29 LatentCompressor LRDecayFT` | 长训中 | `T29 LatentCompressor iter_000027000.pt` | 后期降 LR 微调分支；当前从 `iter_000009000.pt` 续到总 `20000` iter；详见 §7.6 |
-| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v2` | `T29 LatentCompressor LRDecayFT-V2` | 历史暂停 | `LRDecayFT iter_000010000.pt` | validation media 关闭 + `wandb offline` 诊断分支；最新稳定 checkpoint 为 `iter_000005000.pt`；详见 §7.7 |
-| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v3` | `T29 LatentCompressor LRDecayFT-V3` | 长训中 | `LRDecayFT iter_000009000.pt` | 推荐的新平台期优化分支：`masked latent_recon + temporal_delta`；已改回 `validation_iter=500`，latent mask 改为 conservative pooling；当前按聚合 depth 指标最优点是 `iter_000007500.pt` |
-| `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v4` | `T29 LatentCompressor LRDecayFT-V4` | 历史诊断中 | `V3 iter_000008000.pt` | 方案 A：解冻 `post_quant_conv + decoder`；优化器分组 LR 已接通，但初始 validation `4/5` 时再次 `SIGKILL`；详见 §7.9 |
-| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t17_streaming` | `T17 Streaming` | 历史暂停 | `CI8x8-Waymo iter_000020000.pt` | 旧 stage-2 主线 |
-| `cosmos_lidar_tokenizer_cv4x8x8_waymo` | `CV4x8x8-Waymo` | 历史完成 | 通用 `CI8x8-Lidar` | 旧版 `9` 帧 causal 语义 |
-| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming` | `T15 Streaming` | 历史暂停 | 通用 `CI8x8-Lidar` | legacy ragged-tail 实验 |
-| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29` | `T29` | 历史暂停 | 通用 `CI8x8-Lidar` | 固定 `29` 帧窗口 baseline |
-| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_flow` | `T29 + flow` | 历史暂停 | 通用 `CI8x8-Lidar` | 时序 loss 探索分支 |
-| `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_streaming` | `T29 Streaming` | 历史暂停 | 通用 `CI8x8-Lidar` | 早期 streaming 探索分支 |
+### 1.3 历史实验怎么理解
+
+- `T29 LatentCompressor` 到 `LRDecayFT-V4` 代表旧主线逐步放松 loss 和 decoder 约束的探索过程。
+- `LRDecayFT-V4` 是旧主线里更值得回看的对照点，但它不再是新的初始化来源。
+- `LRDecayFT-V5` 保留在文档里，主要用于和 `OpenSora-S2/S3` 的 bottleneck 放松思路做对照。
 
 ### 1.4 命名速查
 
@@ -68,14 +58,15 @@
 - `Waymo-T17-Streaming` 可以读成：
   `Waymo` 数据域 + `CV4x8x8` 视频 tokenizer + `17` 帧总输入 + streaming 训练/推理路径。
 
-## 2. 运行环境与外部启动
+## 2. 运行环境与启动
 
 统一环境：
 - 工作目录：`/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen`
 - conda 环境：`cosmos-predict1`
-- checkpoint 根目录：`checkpoints/`，实际软链接到 `/data2/checkpoints/`
+- 输出根目录：`checkpoints/`
+- 当前推荐实验：`cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s1`
 
-每次启动训练前建议统一执行：
+每次启动训练前先执行：
 
 ```bash
 cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
@@ -84,140 +75,106 @@ conda activate cosmos-predict1
 export OUTPUT_ROOT=checkpoints
 ```
 
-### 2.1 外部 tmux 启动
+### 2.1 单卡 smoke
 
-长训建议都在外部 `tmux` 里启动，并把 stdout 同步写到实验目录下的 `stdout.log`。
-
-`CI8x8-Waymo`：
+推荐先用下面这条命令确认训练代码、数据和 loss 都能正常推进 iter：
 
 ```bash
-tmux new-session -d -s waymo_tok_ci8x8 '/bin/zsh -lc "
+cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
 source /root/miniforge3/etc/profile.d/conda.sh
 conda activate cosmos-predict1
-cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
 export OUTPUT_ROOT=checkpoints
-torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+torchrun --standalone --nnodes=1 --nproc_per_node=1 \
+  -m cosmos_predict1.tokenizer.training.train \
   --config=cosmos_predict1/tokenizer/training/configs/config.py -- \
-  experiment=cosmos_lidar_tokenizer_waymo \
-  2>&1 | tee checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/stdout.log
-"'
+  experiment=cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s1 \
+  job.group=debug \
+  job.name=Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-Smoke1GPU-BypassFix \
+  job.wandb_name=Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-Smoke1GPU-BypassFix \
+  trainer.max_iter=2 \
+  trainer.validation_iter=1000 \
+  trainer.max_val_iter=1 \
+  trainer.logging_iter=1 \
+  checkpoint.save_iter=1000
 ```
 
-`T29 LatentCompressor`：
+已验证结果：
+- `2026-04-16` 修复首帧 bypass 语义后，单卡 smoke 正常完成 `iter 0` 验证并推进到 `iter 2`。
+- `2026-04-16` `OpenSora-S2` 从 `S1-BypassFix iter_000029500.pt` 接力的单卡 smoke 正常完成 2 个 iter。
+- 输出目录：[Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-Smoke1GPU-BypassFix](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/debug/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-Smoke1GPU-BypassFix)
+
+### 2.2 正式 8 卡启动
+
+`OpenSora-S1-BypassFix` 的复现启动命令：
 
 ```bash
-tmux new-session -d -s waymo_tok_t29_latent '/bin/zsh -lc "
+tmux new-session -d -s waymo_tok_t29_opensora_s1_bypassfix '/bin/zsh -lc "
 source /root/miniforge3/etc/profile.d/conda.sh
 conda activate cosmos-predict1
 cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
 export OUTPUT_ROOT=checkpoints
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export HTTP_PROXY=http://127.0.0.1:7890
-export HTTPS_PROXY=http://127.0.0.1:7890
-export http_proxy=http://127.0.0.1:7890
-export https_proxy=http://127.0.0.1:7890
-export NO_PROXY=localhost,127.0.0.1,::1
-torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
+mkdir -p checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix
+torchrun --standalone --nnodes=1 --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
   --config=cosmos_predict1/tokenizer/training/configs/config.py -- \
-  experiment=cosmos_lidar_tokenizer_waymo_t29_latent_compressor \
-  trainer.max_iter=40000 \
-  2>&1 | tee -a checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log
+  experiment=cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s1 \
+  job.name=Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix \
+  job.wandb_name=Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix \
+  2>&1 | tee -a checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/stdout.log
 "'
 ```
 
-**注意**：flow loss 在 iter 5000 首次启用时会 lazy-download RAFT-large 权重（torchvision hub，21 MB）。机器没外网会直接 `ConnectionRefusedError` 炸掉训练。上面 tmux 启动注入了本地 socks/http 代理作为兜底；更稳妥的做法是提前把权重放进 torch hub cache：
+当前状态：
+- `tmux` 会话 `waymo_tok_t29_opensora_s1_bypassfix` 已结束，训练已完成 `30000/30000`。
+- 日志文件：[stdout.log](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/stdout.log)
+
+`OpenSora-S2` 当前正式启动命令：
 
 ```bash
-mkdir -p /root/.cache/torch/hub/checkpoints
-curl -L -o /root/.cache/torch/hub/checkpoints/raft_large_C_T_SKHT_V2-ff5fadd5.pth \
-  https://download.pytorch.org/models/raft_large_C_T_SKHT_V2-ff5fadd5.pth
+tmux new-session -d -s waymo_tok_t29_opensora_s2 '/bin/zsh -lc "
+source /root/miniforge3/etc/profile.d/conda.sh
+conda activate cosmos-predict1
+cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
+export OUTPUT_ROOT=checkpoints
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export MPLCONFIGDIR=/tmp/matplotlib
+torchrun --master_port=29652 --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
+  --config=cosmos_predict1/tokenizer/training/configs/config.py -- \
+  experiment=cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s2 \
+  job.name=Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2 \
+  job.wandb_name=Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2 \
+  2>&1 | tee -a checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2/stdout.log
+"'
 ```
 
-一旦权重落盘，后续所有 run / resume 都走 cache，不依赖网络。续训用 `tee -a` 追加而不是覆盖 `stdout.log`。
+当前状态：
+- `tmux` 会话 `waymo_tok_t29_opensora_s2` 正在运行。
+- CSV sidecar 会话 `waymo_tok_t29_opensora_s2_loss` 每 `300s` 刷新一次 `validation_loss_history.csv`。
+- 日志文件：[stdout.log](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2/stdout.log)
+- CSV 文件：[validation_loss_history.csv](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2/validation_loss_history.csv)
 
-常用 tmux 操作：
-- 查看会话：`tmux ls`
-- 进入会话：`tmux attach -t waymo_tok_ci8x8`
-- 退出不停止：`Ctrl-b d`
-- 结束会话：`tmux kill-session -t <session_name>`
+### 2.3 续训与查看
 
-### 2.2 续训
-
-这套训练默认按实验目录自动续训：
+自动续训条件：
 - 同一 `job.name`
 - 同一输出目录
 - 目录里存在 `checkpoints/latest_checkpoint.txt`
 
-继续训练时，只要重新用同一个实验名启动，训练器会自动从最近一次保存的 checkpoint 恢复。
-
-常看两个文件：
-- `checkpoints/.../checkpoints/latest_checkpoint.txt`
-- `checkpoints/.../stdout.log`
-
-### 2.3 日志与 Loss 记录
-
-当前推荐做法是同时保留：
-- 本地 `stdout.log + validation_loss_history.csv`
-- 在线 `wandb`
-
-当前 `LRDecayFT` 已切到在线 `wandb`：
-- entity：`leishuangming1103-zhejiang-university`
-- project：`Lidar Tokenizer`
-- run name：`Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT`
-- run id：`u9e21vjg`
-
-当前代码已支持：
-- `wandb_entity`
-- `wandb_project`
-- 续训时复用已有 `wandb_id.txt`，避免同一实验被拆成多条 run
-
-如果本机没有登录态，可先执行：
+常用命令：
 
 ```bash
-source /root/miniforge3/etc/profile.d/conda.sh
-conda activate cosmos-predict1
-wandb login
+tmux ls
+tmux attach -t waymo_tok_t29_opensora_s2
+tail -f checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2/stdout.log
 ```
 
-建议直接看：
-
-```bash
-tail -f checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log
-```
-
-当前主线另外开了一个 sidecar tmux 会话，专门把 validation 指标导成单个 CSV：
-
-```bash
-tmux new-session -d -s waymo_tok_t29_latent_loss '/bin/zsh -lc "
-source /root/miniforge3/etc/profile.d/conda.sh
-conda activate cosmos-predict1
-cd /root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen
-while true; do
-  python scripts/export_validation_loss_csv.py \
-    --log_path checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log \
-    --output_csv checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/validation_loss_history.csv
-  sleep 300
-done
-"'
-```
-
-日志里重点关注：
-- `Validation loss (iteration N): ...`
-- `Loading checkpoint ...`
-- `Done with loading the checkpoint ...`
-- `Done with training.`
-
-说明：
-- 训练进度条基于 `tqdm`，tmux pane 有时会看起来像“没输出”，但 `stdout.log` 通常还在持续写。
-- 当前实验主要以 `Validation loss` 作为阶段性对比信号。
-- `validation_loss_history.csv` 现在是单个合并表：会同时记录 `validation_loss`、聚合分项 loss（如 `color / latent_recon / temporal_delta / flow / kl`）以及聚合 `depth_mae / depth_rmse / depth_relative_error`。
-- 这个 CSV 仍然是从 `stdout.log` 提取的去重版本，便于后续画曲线或比对 resume 前后的走势。
-- checkpoint 默认每 `1000` iter 保存一次，validation 默认每 `500` iter 执行一次。
-- `wandb` 会单独记录：
-  - `train/loss`、`val/loss`
-  - `train/color`、`train/latent_recon`、`train/flow`、`train/kl`
-  - `val/color`、`val/latent_recon`、`val/flow`、`val/kl`
-  - `val/depth_mae`、`val/depth_rmse`、`val/depth_relative_error`
+补充说明：
+- 只有历史 `flow` 分支才需要提前缓存 RAFT 权重；当前 `OpenSora-S1/S2` 配置里 `flow=off`，不依赖这一步。
+- `S2` 建议优先看 `validation_loss_history.csv`、`stdout.log` 和每 `500` iter 的 checkpoint。
 
 ## 3. 数据转换
 
@@ -405,7 +362,37 @@ torchrun --nproc_per_node=8 -m cosmos_predict1.tokenizer.training.train \
 - `cosmos_lidar_tokenizer_cv4x8x8_waymo_t29_streaming`
 - `cosmos_lidar_tokenizer_cv4x8x8_waymo_t15_streaming`
 
-当前默认主线不是这些分支，而是 `T29 LatentCompressor`。
+这些配置仍保留在仓库里供历史回看；当前推荐新主线见 §5.4 的 `OpenSora-S1 / S2 / S3`。
+
+### 5.4 Open-Sora 重开版：`OpenSora-S1 / S2 / S3`
+
+这是当前唯一推荐的新开线。它只复用
+[CI8x8-Waymo iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt)，
+不再承接历史 3D checkpoint。
+
+直接参考：
+- [Open-Sora VAE 报告](/root/workspace/Open-Sora/docs/zh_CN/vae.md)
+- [stage1.py](/root/workspace/Open-Sora/configs/vae/train/stage1.py)
+- [stage2.py](/root/workspace/Open-Sora/configs/vae/train/stage2.py)
+- [stage3.py](/root/workspace/Open-Sora/configs/vae/train/stage3.py)
+- [vae_temporal.py](/root/workspace/Open-Sora/opensora/models/vae/vae_temporal.py:325)
+
+固定约束：
+- 固定 `29 -> 8 -> 29`
+- 保留首帧 bypass，但只在 decode 输出端覆盖首帧
+- 不做变长
+- 2D tokenizer 仍沿用 `CI8x8-Waymo`
+
+| 子阶段 | 实验名 | 可训练模块 | 主要 loss | 当前状态 |
+|--------|--------|------------|-----------|----------|
+| S1 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s1` | `temporal_compressor` | `latent_recon=1.0`，`color=0.1`，`flow=off` | `2026-04-16` 已完成 `30000` iter；总 loss / latent best 为 `iter_000025500.pt`，S2 主接力用 `iter_000029500.pt` |
+| S2 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s2` | `quant_conv + post_quant_conv + decoder + temporal_compressor` | `color=1.0`，`latent_recon=0.25`，`temporal_delta=0.25`，`flow=off` | 已启动 8 卡训练，`iteration 0` validation 通过 |
+| S3 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_opensora_s3` | 同 S2 | `color=1.0`，`latent_recon=0.05 -> 0.0`，`temporal_delta=0.4`，`flow=off` | 配置已就绪，等待 `S2` 最佳 checkpoint |
+
+补充：
+- 当前真正“从零重开”的只有 `S1`，并已完成一轮完整 `30000` iter 训练。
+- `S2` 的 `checkpoint.load_path` 已替换成 `S1-BypassFix iter_000029500.pt`；`S3` 仍保留 `REPLACE_WITH_BEST_S2_CHECKPOINT.pt`，等待 `S2` 收敛后再替换。
+- 这条线迁移的是 Open-Sora 的 `stage-wise objective switch + temporal VAE structure`，不是它的变长训练策略。
 
 ## 6. 推理
 
@@ -484,8 +471,6 @@ python -m cosmos_predict1.tokenizer.inference.lidar_cli \
 
 | Checkpoint | 推理设置 | RMSE | MAE | Rel | 产物 | 备注 |
 |------------|----------|------|-----|-----|------|------|
-| `iter_000011000` | `20` 帧，image tokenizer | 未回填 | 未回填 | 未回填 | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter11000_clip1/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter11000_clip1/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter11000_clip1/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 只保留了产物目录，终端指标未单独记录 |
-| `iter_000013000` | `20` 帧，image tokenizer | 未回填 | 未回填 | 未回填 | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter13000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter13000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_iter13000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | 只保留了产物目录，终端指标未单独记录 |
 | `iter_000020000` | `20` 帧，image tokenizer | `0.20 m` | `0.09 m` | `0.00` | [range](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_ci8x8_waymo_iter20000/range_map_video/10203656353524179475_7625_000_7645_000.mp4) / [hist](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_ci8x8_waymo_iter20000/histogram/10203656353524179475_7625_000_7645_000.png) / [pcd](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/dump_results/lidar_tokenizer/waymo_eval_ci8x8_waymo_iter20000/point_cloud/10203656353524179475_7625_000_7645_000.mp4) | Stage-1 最终结果 |
 
 ### 7.2 旧版 `CV4x8x8-Waymo`
@@ -570,7 +555,7 @@ python -m cosmos_predict1.tokenizer.inference.lidar_cli \
 | loss 设置 | `color=1.0`，`latent_recon=1.0`，`flow` 在 `iter 5000` 后开启且权重 `0.002`，`kl=1e-5`，`perceptual/video_consistency/ema=off` |
 | 关键设置 | `strict_resume=False`，checkpoint 瘦身后单文件约 `49 MB` |
 | 日志记录 | [stdout.log](./cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/stdout.log) / [validation_loss_history.csv](./cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor/validation_loss_history.csv) |
-| 当前状态 | 当前主线；`2026-04-12` 从 `iter_000017000.pt` 续训到总 `40000` iter |
+| 当前状态 | 历史主线；`2026-04-12` 从 `iter_000017000.pt` 续训到总 `40000` iter |
 
 训练记录（节选）：
 
@@ -723,16 +708,128 @@ python -m cosmos_predict1.tokenizer.inference.lidar_cli \
 | 训练输入 | 固定总输入 `29 = 1 + 28`，空间 `512 x 896` |
 | 压缩语义 | `29 -> 8 -> 29`，第 `1` 帧旁路保留、不参与压缩 |
 | 精度 | `bfloat16` |
-| 验证设置 | `validation_iter=500`，`max_val_iter=5`，`wandb offline`，validation media 关闭 |
+| 验证设置 | `validation_iter=500`，`max_val_iter=5`，`wandb offline`，validation media 关闭，`dataloader_val.prefetch_factor=2` |
 | loss 设置 | 继承 `V3`：`color + masked latent_recon + temporal_delta + low-weight flow + small kl` |
 | 日志记录 | [stdout.log](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V4/stdout.log) / [validation_loss_history.csv](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V4/validation_loss_history.csv) |
-| 当前状态 | 已修复优化器参数组接线；8 卡 run 已能正常进入 `Starting training...` 并跑到初始 validation，但在 `4/5` 时再次被系统 `SIGKILL`，尚未写出 `iteration 0` 聚合指标或稳定 checkpoint |
+| 当前状态 | 已稳定写出多个 checkpoint；当前 `depth_mae / depth_rmse` 最优点是 [iter_000005500.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V4/checkpoints/iter_000005500.pt)，`depth_relative_error` 最优点是 [iter_000008000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-LRDecayFT-V4/checkpoints/iter_000008000.pt) |
 
 说明：
 
 - `V4` 不是重新发明结构，而是在现有 `T29 LatentCompressor` 上把“只训 temporal compressor”升级成“冻结 encoder/quant_conv，轻量 joint finetune decoder 侧”的版本。
 - 第一轮启动暴露了一个代码问题：优化器分组参数经过 `LazyConfig` 后混入了 `DictConfig`，导致 `TypeError: optimizer can only optimize Tensors`。该问题已在 [training/model.py](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/cosmos_predict1/tokenizer/training/model.py) 修复。
-- 修复后，`V4` 已确认能越过优化器初始化、加载 checkpoint，并进入初始 validation；当前新的阻塞点不在方案 A 代码本身，而仍然是这台机器在 validation 尾段的 `SIGKILL` 老问题。
+- 采用更干净的启动方式并把 `dataloader_val.prefetch_factor` 降到 `2` 后，`V4` 已能稳定跑过多个 validation 节点；系统 `SIGKILL` 风险有所缓解，但底层根因仍未完全定位。
+- `V4` 当前更应该按聚合 `depth_mae / depth_rmse / depth_relative_error` 选 checkpoint，而不是只盯总 `validation_loss`；从曲线看它已经进入平台震荡区，但仍整体优于 `V3`。
+
+关键训练节点：
+
+| iter | val loss | depth_mae | depth_rmse | depth_rel | 备注 |
+|------|----------|-----------|------------|-----------|------|
+| 4500 | `0.480957` | `1.646758` | `4.710167` | `0.060560` | `5000` 前的旧权重 regime |
+| 5000 | `0.148096` | `1.668455` | `4.757467` | `0.062871` | `latent_recon` 权重切到 `0.25` 后的首个点，loss 存在阶跃 |
+| 5500 | `0.134204` | `1.375925` | `4.167069` | `0.055805` | 当前 `depth_mae / depth_rmse` 最优点 |
+| 6500 | `0.133508` | `1.523177` | `4.618411` | `0.059177` | 总 loss 最低点，但 depth 指标不如 `5500` |
+| 8000 | `0.135413` | `1.417164` | `4.270668` | `0.054947` | 当前 `depth_relative_error` 最优点 |
+| 9000 | `0.139575` | `1.458441` | `4.320888` | `0.058258` | 仍在平台震荡区内，未明显刷新 best |
+
+判断：
+
+- `V4` 的 decoder-side finetune 是有效的，尤其在 `depth_mae / depth_rmse / depth_relative_error` 上都优于 `V3`。
+- 但这条线到 `5500 ~ 9000` 已经很像平台期：不同 depth 指标的最优点开始分裂，说明继续单纯加 iter 的边际收益在变小。
+- 因此下一步更合适的是基于 `V4` 的 best checkpoint 继续放松 bottleneck 约束，而不是继续在 `V4` 上无脑堆轮数。
+
+### 7.10 `T29 LatentCompressor LRDecayFT-V5`（设计中）
+
+设计目标：
+
+- 在 `V4` 证明“轻量 joint finetune decoder 侧”有效之后，进一步验证 plateau 是否来自 **冻结 `quant_conv` 让 bottleneck 分布过于僵硬**。
+- 继续冻结 `encoder`，但把可训练模块从 `post_quant_conv + decoder` 扩展到 `quant_conv + post_quant_conv + decoder`。
+- 让目标函数更偏向最终 range 重建和时序一致性，而不是持续被 `latent_recon` 强约束住。
+
+拟定训练设置：
+
+| 项目 | 设计 |
+|------|------|
+| 实验名 | `cosmos_lidar_tokenizer_waymo_t29_latent_compressor_lrdecay_ft_v5` |
+| 初始化来源 | `V4 iter_000008000.pt` |
+| 冻结模块 | `encoder` |
+| 可训练模块 | `quant_conv`、`post_quant_conv`、`decoder`、`temporal_compressor` |
+| 学习率策略 | compressor 主 LR=`3e-6`；image tokenizer 模块 `lr_scale=0.1` |
+| checkpoint 保存 | `save_iter=500` |
+| loss 设置 | `color + latent_recon + temporal_delta + small kl`，关闭 `flow` |
+| `latent_recon` | 先保持 `0.25`，在 `iter 6500` 后降到 `0.1` |
+| `temporal_delta` | 从 `0.25` 提到 `0.35` |
+| 验证设置 | `validation_iter=500`，`max_val_iter=5`，`prefetch_factor=2`，`wandb offline` |
+| 选模指标 | 以聚合 `depth_mae / depth_rmse / depth_relative_error` 为主，不再以总 `validation_loss` 为主 |
+
+设计动机：
+
+- `V4` 已经说明只解冻 decoder 侧可以继续改善 depth 指标，但平台期来得很快。
+- 当前 `latent_recon` 仍然主导总 loss，而 target latent 又来自冻结的 `quant_conv` 路径，这会限制 temporal compressor 和 decoder 为最终 range 重建做更有利的偏移。
+- `V5` 的核心假设是：**在仍然冻结 encoder 的前提下，放开 `quant_conv` 可以让 bottleneck 映射与 decoder 一起协同适配时序压缩后的 latent 分布**。
+- 同时关闭 `flow` 可以去掉一个域不完全匹配、但会增加验证负载的项，让训练目标更聚焦。
+
+### 7.11 `OpenSora-S1 / S2 / S3`（推荐的新开线）
+
+这条线只重新加载 `CI8x8-Waymo` 的 2D 权重，并把 stage-2 明确拆成 `S1 / S2 / S3` 三段；目标是把旧主线里“训练目标切换过慢”的问题拆开处理。
+
+| 项目 | 记录 |
+|------|------|
+| 2D 初始化 | [CI8x8-Waymo iter_000020000.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-CI8x8-Waymo/checkpoints/iter_000020000.pt) |
+| 3D 结构 | `opensora_temporal_vae` |
+| 固定设定 | `29 -> 8 -> 29`，首帧 bypass，不做变长 |
+| S1 训练模块 | `temporal_compressor` |
+| S2 / S3 训练模块 | `post_quant_conv + decoder + temporal_compressor`（`quant_conv` 只在 encode 路径使用，encode 在 `no_grad` 下运行，解冻无效） |
+| 当前状态 | `2026-04-16` 已完成 `30000` iter；后半段进入平台震荡 |
+| 正式输出目录 | [Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix) |
+| 正式日志 | [stdout.log](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/stdout.log) |
+| Loss CSV | [validation_loss_history.csv](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/validation_loss_history.csv) |
+| Loss 曲线 | [validation_loss_curve.png](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/validation_loss_curve.png) |
+| S1 latent best checkpoint | [iter_000025500.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/checkpoints/iter_000025500.pt) |
+| S2 主接力 checkpoint | [iter_000029500.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/checkpoints/iter_000029500.pt) |
+| S2 输出目录 | [Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2) |
+| 当前结论 | `S1` 已进入平台期；`S2` 已从 `iter_000029500.pt` 接力启动 |
+
+S1 validation 关键节点：
+
+| iter | val loss | latent recon | color | depth mae | depth rmse | depth rel | 备注 |
+|------|----------|--------------|-------|-----------|------------|-----------|------|
+| 0 | `3.170703` | `3.092578` | `0.076831` | `27.610565` | `30.429682` | `2.157027` | 初始点 |
+| 500 | `1.676172` | `1.658594` | `0.017456` | `6.464605` | `11.057816` | `0.289883` | 早期快速收敛 |
+| 5000 | `0.640625` | `0.635352` | `0.005368` | `3.696425` | `7.856123` | `0.138406` | 进入稳定下降段 |
+| 16000 | `0.484302` | `0.481348` | `0.003145` | `2.205369` | `5.215471` | `0.093866` | depth rmse 最优 |
+| 25500 | `0.448047` | `0.445093` | `0.003004` | `2.183936` | `5.502246` | `0.084676` | 总 loss / latent recon / color 最优 |
+| 29500 | `0.452832` | `0.449951` | `0.003064` | `2.165261` | `5.509322` | `0.084322` | depth mae 最优 |
+| 30000 | `0.457764` | `0.454492` | `0.003161` | `2.223384` | `5.615626` | `0.083239` | depth rel 最优 |
+
+选模建议：
+- `S2` 主接力使用 [iter_000029500.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/checkpoints/iter_000029500.pt)，因为 `S2` 会转向 raw/depth reconstruction，`29500` 是 S1 validation `depth_mae` 最低点，并且单条 29 帧样本推理优于 `25500/30000`。
+- [iter_000025500.pt](/root/workspace/Cosmos-Drive-Dreams/cosmos-transfer-lidargen/checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S1-BypassFix/checkpoints/iter_000025500.pt) 继续保留为 latent best 对照；如果 `S2` 从 `29500` 接力不稳定，再回退到该 checkpoint。
+- `25500` 之后 `validation_loss` 基本平台震荡，最终 `30000` 比 best 高约 `2.17%`，没有明显 collapse。
+
+S2 配置修正记录（`2026-04-16`）：
+- **移除 `quant_conv`**：`quant_conv` 只在 encode 路径使用，encode 跑在 `torch.no_grad()` 下，永远不会收到梯度。标记为 trainable 只会浪费 optimizer 内存和 checkpoint 空间。
+- **loss 重心改为 latent 主导**：对齐 OpenSora 分阶段思路，S2 仍以 `latent_recon=1.0` 为主，`color=0.25` 辅助，`temporal_delta=0.1`。像素主导推到 S3（`color=1.0`）。
+- **S3 同步调整**：显式设 `color=1.0`，`latent_recon` 从 `0.25` 在 iter 1000 后衰减到 `0.05`（不完全丢弃 latent 约束），`temporal_delta=0.25`。
+- 之前基于旧 loss 权重的 S2 试跑数据已清除，重新从 `iter_000029500.pt` 启动。
+
+三阶段 loss 对比（修正后）：
+
+| | S1 | S2 | S3 |
+|---|---|---|---|
+| color | 0.1 | 0.25 | **1.0** |
+| latent_recon | **1.0** | **1.0** | 0.25→0.05 |
+| temporal_delta | off | 0.1 | 0.25 |
+| kl | 1e-5 | 1e-5 | 1e-5 |
+| 解冻模块 | 无 | post_quant_conv + decoder | post_quant_conv + decoder |
+
+渐进思路：S1 纯 latent → S2 latent 主导 + decoder 适应 → S3 像素主导 + latent 收尾。
+
+Open-Sora 对应参考：
+- [Open-Sora VAE 报告](/root/workspace/Open-Sora/docs/zh_CN/vae.md)
+- [stage1.py](/root/workspace/Open-Sora/configs/vae/train/stage1.py)
+- [stage2.py](/root/workspace/Open-Sora/configs/vae/train/stage2.py)
+- [stage3.py](/root/workspace/Open-Sora/configs/vae/train/stage3.py)
+- [vae_temporal.py](/root/workspace/Open-Sora/opensora/models/vae/vae_temporal.py:325)
 
 ## 8. 原始数据可视化
 
@@ -760,17 +857,12 @@ python cosmos-drive-dreams-toolkits/visualize_waymo_rangemap.py \
 
 ## 9. 当前已知限制
 
-- 当前 `T29 LatentCompressor`、`LRDecayFT` 与 `LRDecayFT-V2` 都已回填单条验证样本推理结果；`V3` 目前先以聚合 validation depth 指标作为主判断口径，整套验证集平均推理指标仍未回填。
-- 该方案只支持固定 `29` 帧，不支持变长和 streaming 长序列。
-- 当前 `T17 Streaming` 虽然支持 `29` 帧推理，但质量仍明显弱于 `CI8x8-Waymo` 的单帧重建。
-- 当前新主线使用 `color + latent_recon + delayed flow + small kl`，仍属于 v1 baseline。
-- `V3` 虽然把 latent mask 下采样改成了 conservative pooling，但 latent_recon 上的 gating 仍不是“严格剔除 invalid receptive field”，而更接近对有效区域的近似重加权。
-- `V3` 在 `iter 5000` 处有一次明确的 loss 权重切换，因此总 `validation_loss` 曲线存在阶跃，不宜简单与 `5000` 前做同尺度比较。
-- 点云视频渲染在当前环境里不够稳定，`range_map_video + histogram` 更适合作为常规评估输出。
-- 当前 `T17` 训练多次在 validation 后被 `SIGKILL`；最新稳定 checkpoint 是 `iter_000017000.pt`。
-- **Flow loss 在 iter 5000 首次启用时依赖网络下载 RAFT 权重**：`torchvision.models.optical_flow.raft_large(pretrained=True)` 会 lazy 拉取 `raft_large_C_T_SKHT_V2-ff5fadd5.pth`。离线环境必须提前把权重放进 `~/.cache/torch/hub/checkpoints/`，否则 iter 5000 的首个 validation 会直接崩溃。具体操作见 §2.1。本次长训就是在 iter 5000 踩到了这个坑，通过预下载 + 代理 env 双兜底恢复。
-- `V3` 把 `max_val_iter` 收回到 `5` 以减轻 validation 阶段的系统负载；代价是 val 曲线会比 `V1/V2` 更抖，最好结合离线推理或聚合 depth 指标一起看。
-- `V4` 已证明方案 A 的代码接线和优化器分组没有问题，但 validation 阶段的系统 `SIGKILL` 仍未解除；下一步如果继续推进 V4，更可能需要继续减轻 validation 负载，而不是再改 decoder finetune 结构本身。
+- `OpenSora-S1` 当前以 `BypassFix` 版本作为正式基线，已有稳定 checkpoint 和 29 帧离线推理可视化结果。
+- 当前新主线是**有意保持固定 `29` 帧**，不引入变长；这不是遗漏，而是为了先把 Open-Sora 的 stage-wise objective switch 在 fixed-29 设定里验证清楚。
+- `OpenSora-S2` 已指向 `S1-BypassFix iter_000029500.pt`，loss 权重已修正为 latent 主导（`2026-04-16`）；`OpenSora-S3` 仍是 fail-fast 占位值，等 `S2` best 出来后再替换。
+- 历史 `flow` 分支首次进入相关 validation 时仍依赖 RAFT 权重缓存；当前 `OpenSora-S1` 因为 `flow=off` 不受这件事影响。
+- 历史实验里“单条样本推理指标”和“聚合 validation depth 指标”不是同一口径，横向比较时要区分。
+- 当前环境已补齐 `ffmpeg` 和 Kaleido/Chrome 依赖，点云视频渲染可以跑通；常规快速检查仍建议先看 `range_map_video + histogram`。
 
 ## 10. 关键文件
 
