@@ -830,11 +830,11 @@ Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["job"]["wandb_name"
 )
 Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["checkpoint"]["load_path"] = (
     "checkpoints/posttraining/tokenizer/Cosmos-LidarTokenizer-Waymo-T29-LatentCompressor-OpenSora-S2/"
-    "checkpoints/REPLACE_WITH_BEST_S2_CHECKPOINT.pt"
+    "checkpoints/iter_000035500.pt"
 )
 Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["trainer"].update(
     {
-        "max_iter": 6000,
+        "max_iter": 40000,
         "validation_iter": 500,
         "max_val_iter": 5,
         "logging_iter": 100,
@@ -842,8 +842,8 @@ Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["trainer"].update(
 )
 Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["optimizer"]["lr"] = 2e-6
 Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["scheduler"] = dict(
-    warmup_iters=100,
-    lr_decay_iters=6000,
+    warmup_iters=200,
+    lr_decay_iters=40000,
     min_lr=2e-7,
 )
 Cosmos_LidarTokenizer_Waymo_T29_LatentCompressor_OpenSora_S3["model"]["config"]["loss"]["config"][
